@@ -37,6 +37,14 @@ def check_must_be_empty(value):
     if s_val == "" or s_val.lower() == "nan": return True
     return False
 
+def check_greater_than_zero(value):
+    try:
+        if float(value) > 0: 
+            return True
+    except:
+        pass
+    return False
+
 def check_incoterm_rules(row):
     errors = []
     incot = str(row.get('IncoT', '')).strip().upper()
@@ -124,13 +132,18 @@ def get_primary_id(row):
     if check_mandatory(row.get('Synertrade Supplier ID')): return str(row['Synertrade Supplier ID'])
     return "N/A"
 
-def to_excel_download(full_df, df_errors, duplicates_df, metrics_dict, error_breakdown_df, bad_cells):
+# ==========================================
+# 3. SMD ANALYSIS LOGIC (Hybrid Engine)
+# ==========================================
+
+def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error_breakdown_df, bad_cells):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
-        
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
-        header_format = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+        header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
+        # red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+        # header_format = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
         bold_format = workbook.add_format({'bold': True})
 
         # --- Sheet 1: Dashboard ---
@@ -219,27 +232,46 @@ def to_excel_download(full_df, df_errors, duplicates_df, metrics_dict, error_bre
             subset = full_df[full_df[col_name] != ""]
             if not subset.empty:
                 valid_disp = [c for c in disp_cols if c in full_df.columns]
-                subset[valid_disp + [col_name]].to_excel(writer, index=False, sheet_name=sheet_name)
+                final_cols = valid_disp + [col_name]
+                subset[final_cols].to_excel(writer, index=False, sheet_name=sheet_name)
+
+                # apply header format 
+                ws = writer.sheets[sheet_name]
+                for i, col in enumerate(final_cols):
+                    ws.write(0, i, col, header_format)
+                ws.set_column(0, len(final_cols)-1, 25) 
 
         # --- General Split Tabs ---
-        if 'General_Errors' in full_df.columns:
-            mand_mask = full_df['General_Errors'].str.contains("missing|Required", case=False, na=False)
-            mand_df = full_df[mand_mask]
-            if not mand_df.empty:
-                valid_disp = [c for c in disp_cols if c in full_df.columns]
-                mand_df[valid_disp + ['General_Errors']].to_excel(writer, index=False, sheet_name='Gen_Mandatory_Missing')
+        gen_tabs = [
+            ('missing|Required', 'Gen_Mandatory_Missing'),
+            ('must be empty', 'Gen_Should_Be_Empty')
+        ]
 
-            empty_mask = full_df['General_Errors'].str.contains("must be empty", case=False, na=False)
-            emp_df = full_df[empty_mask]
-            if not emp_df.empty: 
-                valid_disp = [c for c in disp_cols if c in full_df.columns]
-                emp_df[valid_disp + ['General_Errors']].to_excel(writer, index=False, sheet_name='Gen_Should_Be_Empty')
-            
-            fmt_mask = (full_df['General_Errors'] != "") & (~mand_mask) & (~empty_mask)
+        if 'General_Errors' in full_df.columns:
+            valid_disp = [c for c in disp_cols if c in full_df.columns]
+            final_cols = valid_disp + ['General_Errors']
+
+            # Mandatory & empty
+            for keyword, sheet_name in gen_tabs:
+                mask = full_df['General_Errors'].str.contains(keyword, case=False, na=False)
+                sub_df = full_df[mask]
+                if not sub_df.empty: 
+                    sub_df[final_cols].to_excel(writer, index=False, sheet_name=sheet_name)
+                    ws = writer.sheets[sheet_name]
+                    for i, col in enumerate(final_cols): ws.write(0, i, col, header_format)
+                    ws.set_column(0, len(final_cols)-1, 25)
+
+            # Formatting             
+            fmt_mask = (full_df['General_Errors'] != "") & \
+            (~full_df['General_Errors'].str.contains("missing|Required", case=False, na=False)) & \
+            (~full_df['General_Errors'].str.contains("must be empty", case=False, na=False))
+
             fmt_df = full_df[fmt_mask]
-            if not fmt_df.empty: 
-                valid_disp = [c for c in disp_cols if c in full_df.columns]
-                fmt_df[valid_disp + ['General_Errors']].to_excel(writer, index=False, sheet_name='Gen_Formatting_Logic')
+            if not fmt_df.empty:
+                fmt_df[final_cols].to_excel(writer, index=False, sheet_name='Gen_Formatting_Logic')
+                ws = writer.sheets['Gen_Formatting_Logic']
+                for i, col in enumerate(final_cols): ws.write(0, i, col, header_format)
+                ws.set_column(0, len(final_cols)-1, 25)
 
         # --- Duplicates ---
         if not duplicates_df.empty:
@@ -255,10 +287,6 @@ def to_excel_download(full_df, df_errors, duplicates_df, metrics_dict, error_bre
             ws_dupe.set_column(0, 0, 30)
 
     return output.getvalue()
-
-# ==========================================
-# 3. SMD ANALYSIS LOGIC (Hybrid Engine)
-# ==========================================
 
 def run_smd_analysis(df, requirements_df, target_cocd, target_porg, region):
     df_out = df.copy()
@@ -430,34 +458,215 @@ def run_email_analysis(df):
     df_out.insert(0, 'Email_Validation_Errors', final_error_col)
     return df_out
 
-def to_excel_email_download(df_result):
+def to_excel_email_download(df_result, metrics_dict):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
+        bold_format = workbook.add_format({'bold': True})
         
+        # Dashboard summary 
+        ws0 = workbook.add_worksheet('Dashboard Summary')
+
+        # High level metrics
+        ws0.write('B2', "Email Validation Summary", header_format)
+        ws0.write('B3', "Total Records", bold_format)
+        ws0.write('C3', metrics_dict['Total'])
+        ws0.write('B4', "Correct Records", bold_format)
+        ws0.write('C4', metrics_dict['Correct'])
+        ws0.write('B5', "Records with Issues", bold_format)
+        ws0.write('C5', metrics_dict['Errors'])
+
+        ws0.set_column(1, 2, 25)
+
+        # Error Summary
         df_err = df_result[df_result['Email_Validation_Errors'] != ""]
         if not df_err.empty:
             df_err.to_excel(writer, index=False, sheet_name='Error_Summary')
             ws1 = writer.sheets['Error_Summary']
             for i, col in enumerate(df_err.columns): ws1.write(0, i, col, header_format)
             ws1.set_column(0, 0, 50)
+            ws1.set_column(1, len(df_err.columns)-1, 15)
         
+        # Full email data
         df_result.to_excel(writer, index=False, sheet_name='Full_Email_Data')
         ws2 = writer.sheets['Full_Email_Data']
         (max_row, max_col) = df_result.shape
+
         for i, col in enumerate(df_result.columns): ws2.write(0, i, col, header_format)
+
+        # conditional formatting applied
         ws2.conditional_format(1, 0, max_row, max_col - 1, {'type': 'formula', 'criteria': '=$A2<>""', 'format': red_format})
         ws2.set_column(0, 0, 50)
+
+    return output.getvalue()
+
+# ==========================================
+# 5. PO ANALYSIS LOGIC 
+# ==========================================
+
+def run_po_analysis(df, requirements_df): 
+    """
+    Dynamic PO Validation based on Uploaded Rules. 
+    Rules structure: Field, Rule, Category, Error_Message 
+    """
+
+    df_out = df.copy()
+    df.columns = df.columns.str.strip()
+
+    # Parse rules
+    req_dict = {'Mandatory': [], 'Numeric': [], 'NoSpecial': []}
+
+    if requirements_df is not None: 
+        requirements_df.columns = [c.strip().title() for c in requirements_df.columns]
+        if 'Field' in requirements_df.columns and 'Rule' in requirements_df.columns: 
+            for idx, row in requirements_df.iterrows(): 
+                field = str(row['Field']).strip()
+                rule = str(row['Rule']).strip()
+                cat = str(row['Category']).strip() if 'Category' in requirements_df.columns else 'General'
+                msg = str(row['Error_Message']).strip() if 'Category' in requirements_df.columns else f"{field} Error"
+
+                rule_obj = {'field': field, 'cat': cat, 'msg': msg}
+
+                if 'mandatory' in rule: req_dict['Mandatory'].append(rule_obj)
+                if 'numeric' in rule or 'greaterthan' in rule: 
+                    req_dict['Numeric'].append(rule_obj)
+                    # add more logic if needed
+
+    # Iterate rows 
+    all_error_details = []
+    bad_cells = []
+
+    # Dynamic category dictionaries to store errors per category
+    category_map = {}
+
+    for index, row in df.iterrows(): 
+        row_errors = []
+
+        # helper
+        def log_po_err(msg, col, cat): 
+            row_errors.append(msg)
+            bad_cells.append((index, col))
+            # store in category specific list for later split 
+            if index not in category_map: 
+                category_map[index] = {}
+            if cat not in category_map[index]: 
+                category_map[index][cat] = []
+                category_map[index][cat].append(msg)
+        
+        # Mandatory Checks 
+        for item in req_dict['Mandatory']: 
+            if item['field'] in df.columns and not check_mandatory(row[item['field']]): 
+                log_po_err(item['msg'], item['field'], item['cat'])
+        
+        # Numeric checks (>0)
+        for item in req_dict['Numeric']: 
+            if item['field'] in df.columns:
+                val = row[item['field']]
+                if check_mandatory(val): 
+                    try: 
+                        if float(val) <= 0: 
+                            log_po_err(item['msg'], item['field'], item['cat'])
+                    except: 
+                        log_po_err(f"{item['field']} must be numeric", item['field'], item['cat'])
+        
+        all_error_details.append(" | ".join(row_errors))
+
+    # Add columns to DF
+    # need to find all unique categories used 
+    all_cats = set()
+    if requirements_df is not None and 'Category' in requirements_df.columns: 
+        all_cats = set(requirements_df['Category'].dropna().unique())
+    else: 
+        all_cats = {'General'}
+    
+    for cat in all_cats:
+        cat_col_name = f"{cat}_Errors"
+        cat_values = []
+        for i in range(len(df)):
+            if i in category_map and cat in category_map[i]: 
+                cat_values.append(" | ".join(category_map[i][cat]))
+            else: 
+                cat_values.append("")
+        df_out.insert(0, cat_col_name, cat_values)
+    
+    return df_out, bad_cells, list(all_cats)
+
+def to_excel_po_download(full_df, bad_cells, category_list):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
+        workbook = writer.book
+        red_foramt = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+        header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
+        bold_format = workbook.add_format({'bold': True})
+
+        # metrics calculation 
+        total = len(full_df)
+        errors = len(full_df[full_df['Error_Details'] != ""])
+        correct = total - errors
+
+        # Dashboard 
+        ws0 = workbook.add_worksheet('Dashboard_Summary')
+        ws0.write('B2', "PO Analysis Summary", header_format)
+        ws0.write('B3', "Total Records", bold_format)
+        ws0.write('C3', total)
+        ws0.write('B4', "Records with Errors", bold_format)
+        ws0.write('C4', errors)
+
+        # Breakdown
+        ws0.write('B7', "Errors by Category", header_format)
+        ws0.write('C7', "Count", header_format)
+        r = 8 
+        for cat in category_list: 
+            col_name = f"{cat}_Errors"
+            if col_name in full_df.columns: 
+                count = len(full_df[full_df[col_name] != ""])
+                ws0.write(r, 1, cat)
+                ws0.write(r, 2, count)
+                r += 1
+        ws0.set_column(1, 1, 40)
+
+        # Raw Data
+        # drop helper columns
+        drop_cols = ['Error_Details'] + [f"{c}_Errors" for c in category_list]
+        clean_df = full_df.drop(columns=[c for c in drop_cols if c in full_df.columns])
+
+        clean_df.to_excel(writer, index=False, sheet_name='Full_Raw_Data')
+        ws2 = writer.sheets['Full_Raw_Data']
+
+        for i, col in enumerate(clean_df.columns): ws2.write(0, i, col, header_format)
+
+        # highlight cells 
+        col_map = {name: i for i, name in enumerate(clean_df.columns)}
+        for row_idx, col_name in bad_cells:
+            if col_name in col_map: 
+                excel_col_idx = col_map[col_name]
+                excel_row_idx = row_idx + 1
+                try: 
+                    val = clean_df.iat[row_idx, excel_col_idx]
+                    if pd.isna(val): ws2.write_blank(excel_row_idx, excel_col_idx, None, red_foramt)
+                    else: ws2.write(excel_row_idx, excel_col_idx, val, red_foramt)
+                except: pass
+        ws2.freeze_panes(1, 0)
+
+        # Categories
+        for cat in category_list: 
+            col_name = f"{cat}_Errors"
+            if col_name in full_df.columns: 
+                subset = full_df[full_df[col_name] != ""]
+                if not subset.empty: 
+                    # show the first 3 cols of raw data + error column
+                    preview_cols = list(clean_df.columns[:3]) + [col_name]
+                    subset[preview_cols].to_excel(writer, index=False, sheet_name=f"{cat}_Errors")
     return output.getvalue()
 
 def main(): 
     with st.sidebar:
         st.title("🛡️ Workbench")
-        st.write("v6.0 - Hybrid Rule Engine")
+        st.write("v8.0 - Hybrid Rule Engine")
         st.markdown("---")
-        task = st.radio("Select Module", ["Home", "SMD Analysis", "Email Validation"])
+        task = st.radio("Select Module", ["SMD Analysis", "Email Validation", "PO Analysis"])
         st.markdown("---")
         
         target_cocd = "3072"
@@ -474,11 +683,12 @@ def main():
         st.title("Procurement Workbench")
         st.info("Select a module from the sidebar.")
 
+    # --- SMD ANALYSIS ---
     elif task == "SMD Analysis": 
         st.title(f"SMD Validation ({region_mode})")
         
         st.subheader("1. Upload Rules Config (Optional)")
-        req_file = st.file_uploader("Upload Excel with columns: Field, Rule, Region", type=['xlsx'], key='req')
+        req_file = st.file_uploader("Upload 'SMD_Rules_Config.xlsx'", type=['xlsx'], key='smd_req')
         
         req_df = None
         if req_file:
@@ -487,7 +697,7 @@ def main():
             with st.expander("View Rules"): st.dataframe(req_df)
 
         st.subheader("2. Upload Raw Data")
-        uploaded_file = st.file_uploader("Upload SAP/Raw Data", type=['xlsx'], key='raw')
+        uploaded_file = st.file_uploader("Upload Raw Data", type=['xlsx'], key='smd_raw')
 
         if uploaded_file and st.button("Run Analysis", type="primary"):
             with st.spinner(f"Analyzing..."):
@@ -528,21 +738,66 @@ def main():
 
                     st.metric("Total Errors", len(df_errors_only))
                     fname = f"SMD_Report_{target_cocd}.xlsx"
-                    data = to_excel_download(results, df_errors_only, duplicates_df, metrics, error_bkdown, bad_cells)
+                    data = to_excel_download_smd(results, df_errors_only, duplicates_df, metrics, error_bkdown, bad_cells)
                     st.download_button("Download Report", data, fname)
 
+    # --- PO ANALYSIS ----
+    elif task == "PO Analysis": 
+        st.title("Purchase Order Analysis")
+
+        st.subheader("1. Upload PO Rules")
+        po_rules_file = st.file_uploader("Upload 'PO_Rules_Config.xlsx'", type=['xlsx'], key='po_rules')
+
+        st.subheader("2. Upload PO Data")
+        po_raw_file = st.file_uploader("Upload Raw PO Data", type=['xlsx'], key='po_raw')
+
+        if po_rules_file and po_raw_file: 
+            if st.button("Run PO Check", type="primary"):
+                with st.spinner("Analyzing..."):
+                    df_po = pd.read_excel(po_raw_file, dtype=str)
+                    rules_df = pd.read_excel(po_rules_file)
+
+                    # Run dynamic PO engine
+                    res_po, bad_cells, cat_list = run_po_analysis(df_po, rules_df)
+
+                    err_count = len(res_po[res_po['Error_Details'] != ""])
+                    st.metric("PO Lines with Errors", err_count)
+
+                    if err_count > 0:
+                        st.dataframe(res_po[res_po['Error_Details'] != ""].head())
+
+                    data = to_excel_po_download(res_po, bad_cells, cat_list)
+                    st.download_button("Download PO Report", data, "PO_Analysis_Report.xlsx")
+    
+    # --- EMAIL ---
     elif task == "Email Validation": 
         st.title("Vendor Email Validation")
-        uploaded_email = st.file_uploader("📁 Upload Email List", type=['xlsx'])
-        if uploaded_email and st.button("Run Email Check"):
-            df = pd.read_excel(uploaded_email, dtype=str)
-            res_email = run_email_analysis(df)
-            errs = res_email[res_email['Email_Validation_Errors'] != ""]
-            st.metric("Issues Found", len(errs))
-            if not errs.empty:
-                data = to_excel_email_download(res_email)
-                st.download_button("Download Email Report", data, "Email_Validation.xlsx")
-            else: st.success("Valid!")
+        uploaded_email = st.file_uploader("Upload Email List", type=['xlsx'])
+
+        if uploaded_email:
+            if st.button("Run Email Check", type="primary"):
+                with st.spinner("Analyzing..."): 
+                    df_email = pd.read_excel(uploaded_email, dtype=str)
+                    res_email = run_email_analysis(df_email)
+
+                    # filter errors
+                    err_df = res_email[res_email['Email_Validation_Errors'] != ""]
+
+                    # Calculate counts
+                    error_count = len(err_df)
+                    metrics_dict = {
+                        'Total': len(res_email),
+                        'Correct': len(res_email) - error_count,
+                        'Errors': error_count
+                    }
+
+                    if not err_df.empty:
+                        st.metric("Issues Found", error_count)
+
+                        # Generate download
+                        data = to_excel_email_download(res_email, metrics_dict)
+                        st.download_button("Download Email Report", data, "Email_Validation.xlsx")
+                    else: st.success("Valid!")
 
 if __name__ == "__main__":
     main()

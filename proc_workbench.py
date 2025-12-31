@@ -676,8 +676,8 @@ def main():
         if task == "SMD Analysis":
             st.header("⚙️ Configuration")
             region_mode = st.radio("Region:", ["APAC", "EU"], horizontal=True)
-            target_cocd = st.text_input("Target CoCd:", value="3072" if region_mode == "APAC" else "DE01")
-            target_porg = st.text_input("Target POrg:", value="3072" if region_mode == "APAC" else "DE01")
+            target_cocd = st.text_input("Target CoCd:", value="3072" if region_mode == "APAC" else "1040")
+            target_porg = st.text_input("Target POrg:", value="3072" if region_mode == "APAC" else "1040")
 
     if task == "Home":
         st.title("Procurement Workbench")
@@ -801,3 +801,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

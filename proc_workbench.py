@@ -754,7 +754,19 @@ def main():
         if po_rules_file and po_raw_file: 
             if st.button("Run PO Check", type="primary"):
                 with st.spinner("Analyzing..."):
-                    df_po = pd.read_excel(po_raw_file, dtype=str)
+                    xls = pd.ExcelFile(po_raw_file)
+                    all_dfs = []
+                    for sheet_name in xls.sheet_names:
+                        try: 
+                            sheet_df = pd.read_excel(po_raw_file, sheet_name=sheet_name, dtype=str)
+                            all_dfs.append(sheet_df)
+                        except: pass
+                    
+                    if not all_dfs:
+                        st.error("No data found in PO file.")
+                        st.stop()
+
+                    df_po = pd.concat(all_dfs, ignore_index=True)
                     rules_df = pd.read_excel(po_rules_file)
 
                     # Run dynamic PO engine
@@ -777,7 +789,19 @@ def main():
         if uploaded_email:
             if st.button("Run Email Check", type="primary"):
                 with st.spinner("Analyzing..."): 
-                    df_email = pd.read_excel(uploaded_email, dtype=str)
+                    xls = pd.ExcelFile(uploaded_email)
+                    all_dfs = []
+                    for sheet_name in xls.sheet_names: 
+                        try: 
+                            sheet_df = pd.read_excel(uploaded_email, sheet_name=sheet_name, dtype=str)
+                            all_dfs.append(sheet_df)
+                        except: pass
+                    
+                    if not all_dfs: 
+                        st.error("No data found in Email file.")
+                        st.stop()
+
+                    df_email = pd.concat(all_dfs, ignore_index=True)
                     res_email = run_email_analysis(df_email)
 
                     # filter errors
@@ -801,4 +825,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

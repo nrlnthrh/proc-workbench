@@ -439,23 +439,51 @@ def run_email_analysis(df):
         st.error(f"Missing columns: {missing}")
         return pd.DataFrame()
     df_out = df.copy()
+
+    # convert "ID" to numbers, turn errors into NaN, fill NaN with a huge number so they are not "min"
+    df_out['ID Numeric'] = pd.to_numeric(df_out['ID'], errors='coerce').fillna(9999999)
+
     vendor_groups = df_out.groupby('Vendor')
     email_errors = []
+
     for idx, row in df_out.iterrows():
         errs = []
         vendor = row['Vendor']
         vendor_data = vendor_groups.get_group(vendor)
+
+        # Notes check
         notes = str(row['Communication link notes']).strip()
         if not check_mandatory(notes): errs.append("Comm. Notes Empty")
-        min_id = vendor_data['ID'].min()
-        if row['ID'] == min_id:
-            flag = str(row['#']).strip().upper()
-            if flag != 'X' and flag != '1': errs.append("Smallest ID not marked Default (#)")
+
+        # Smallest ID logic 
+        # find the mathematical minimum ID
+        min_id = vendor_data['ID Numeric'].min()
+        current_id = row['ID Numeric']
+
+        # check if row is marked (X or 1)
+        flag = str(row['#']).strip().upper()
+        is_marked = (flag == 'X' or flag == '1')
+
+        # Scenario: if it is the smallest ID, but not marked
+        if current_id == min_id:
+            if not is_marked: 
+                errs.append("Smallest ID not marked Default (#)")
+
+        elif current_id != min_id:
+            if is_marked: 
+                errs.append("Non-smallest ID marked as Default")
+                
         email_errors.append(" | ".join(errs))
+
     final_error_col = []
     for idx, row in df_out.iterrows():
         final_error_col.append(email_errors[idx])
+
     df_out.insert(0, 'Email_Validation_Errors', final_error_col)
+
+    # cleanup temp column
+    if 'ID Numeric' in df_out.columns: del df_out['ID Numeric']
+
     return df_out
 
 def to_excel_email_download(df_result, metrics_dict):
@@ -825,3 +853,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

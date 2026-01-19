@@ -669,8 +669,11 @@ def run_po_analysis_dynamic(df, config_file):
     max_prep = get_int('Max_Preparer_Length', 12)
     max_unload = get_int('Max_Unloading_Pt_Length', 25)
     
-    try: small_val = float(settings.get('Small_Value_Limit', 10.0))
-    except: small_val = 10.0
+    # Helper to safely get float (Fixing NameError source)
+    try: 
+        small_val_limit = float(settings.get('Small_Value_Limit', 10.0))
+    except: 
+        small_val_limit = 10.0 # Default fallback
 
     banned_reqs = set([x.strip() for x in str(settings.get('Banned_Requestors', '')).split(',') if x.strip()])
 
@@ -694,9 +697,9 @@ def run_po_analysis_dynamic(df, config_file):
         'R': ['R', 'Rebate', 'Return Item'],
         'Matl Group': ['Matl Group', 'Material Group'],
         'Vendor': ['Vendor', 'Supplier'],
-        'UOM': ['UOM', 'Order Unit'],
+        'OUn': ['OUn', 'Order Unit'],
         'PO UOM': ['PO UOM - Ext'],
-        'Unit Price': ['Unit Price', 'Order Price Unit'],
+        'Order Price Unit': ['Order Price Unit (Purchasing)'],
         'Requestor': ['Requestor'],
         'Preparer': ['Preparer'],
         'SAA': ['SAA', 'Split'],
@@ -704,7 +707,7 @@ def run_po_analysis_dynamic(df, config_file):
         'Vendor Mat': ['Vendor Material Number', 'Vendor Mat'],
         'Curr': ['Curr.', 'Curency', 'Currency'],
         'Crcy': ['Crcy'],
-        'Unit P': ['Unit Price'],
+        'Unit P': ['Unit price'],
         'Schd': ['Schd.', 'Schedule Line'],
         'SLM': ['Supplier SLMID', 'SLM ID'],
         'Unloading': ['Unloading Point - Ext', 'Unloading Point'],
@@ -738,7 +741,7 @@ def run_po_analysis_dynamic(df, config_file):
     res_error_details = [""] * row_count
     
     # Error Category Columns (Dictionary of Lists)
-    cat_keys = ['Compliance', 'Data Quality', 'Financial', 'Vendor', 'Logic Check', 'PCN', 'Unit of Measurement', 'Requestor', 'Preparer', 'Split Accounting', 'Text', 'Currency', 'Schedule Line', 'Unloading Point', 'Doc Type', 'Payment Term', 'FOC', 'Logic Checks', 'Additional Pricing', 'Incoterm']
+    cat_keys = ['Vendor', 'PCN', 'Unit of Measurement', 'Requestor', 'Preparer', 'Split Accounting', 'Text', 'Currency', 'Schedule Line', 'Unloading Point', 'Doc Type', 'Payment Term', 'FOC', 'Logic Checks', 'Additional Pricing', 'Incoterm']
     res_cat_errors = {k: [""] * row_count for k in cat_keys}
     
     bad_cells = [] # List of tuples (row_idx, col_name)
@@ -870,10 +873,10 @@ def run_po_analysis_dynamic(df, config_file):
                 add_err('PCN', "PCN not in UNSPSC", 'Matl Group')
 
             # 2. UOM
-            uom = str(get('UOM')).strip()
+            uom = str(get('OUn')).strip()
             po_uom = str(get('PO UOM')).strip()
-            u_price = str(get('Unit Price Order')).strip()
-            if uom != po_uom: add_err('Unit of Measurement', "UOM != PO UOM", 'UOM')
+            u_price = str(get('Order Price Unit')).strip()
+            if uom != po_uom: add_err('Unit of Measurement', "UOM != PO UOM", 'OUn')
             if po_uom != u_price: add_err('Unit of Measurement', "PO UOM != Order Price Unit", 'PO UOM')
             if 'valid_uom' in rules and po_uom not in rules['valid_uom']: add_err('Unit of Measurement', "UOM Invalid", 'PO UOM')
 
@@ -1287,4 +1290,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

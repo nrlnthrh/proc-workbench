@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd 
 import numpy as np 
 import io
+import re
 
 # ==========================================
 # 1. PAGE CONFIGURATION
@@ -142,13 +143,12 @@ def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error
         workbook = writer.book
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
-        # red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
-        # header_format = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
         bold_format = workbook.add_format({'bold': True})
 
         # --- Sheet 1: Dashboard ---
         worksheet0 = workbook.add_worksheet('Dashboard_Summary')
         worksheet0.write('B2', "High Level Summary", header_format)
+        worksheet0.write('C2', "Count", header_format)
         worksheet0.write('B3', "Total Records", bold_format)
         worksheet0.write('C3', metrics_dict['Total'])
         worksheet0.write('B4', "Correct Records", bold_format)
@@ -292,24 +292,37 @@ def run_smd_analysis(df, requirements_df, target_cocd, target_porg, region):
     df_out = df.copy()
     df.columns = df.columns.str.strip()
 
+    # --- target porg (split by comma) ---
+    # example: "0001, 0002" -> ['0001', '0002']
+    valid_porg_list = []
+    if target_porg: 
+        valid_porg_list = [p.strip() for p in str(target_porg).split(',') if p.strip()]
+
     # --- 1. DYNAMIC CONFIGURATION (Load Rules from Excel) ---
     req_dict = {'Mandatory': [], 'Empty': []}
     
     if requirements_df is not None:
+        # Standardize headers
         requirements_df.columns = [c.strip().title() for c in requirements_df.columns]
-        # Check required columns
+        
+        # Check for required columns
         if 'Field' in requirements_df.columns and 'Rule' in requirements_df.columns:
             for idx, row in requirements_df.iterrows():
                 field = str(row['Field']).strip()
                 rule = str(row['Rule']).strip().lower()
                 
-                # Check Region Scope if column exists (Default to ALL if missing)
+                # Get Region & Category safely
                 rule_region = str(row['Region']).strip().upper() if 'Region' in requirements_df.columns else 'ALL'
+                cat = str(row['Category']).strip() if 'Category' in requirements_df.columns else 'General'
                 
-                # Apply if Region matches selected mode OR is ALL
+                # Apply if Region matches
                 if rule_region == 'ALL' or rule_region == region.upper():
-                    if 'mandatory' in rule: req_dict['Mandatory'].append(field)
-                    if 'empty' in rule: req_dict['Empty'].append(field)
+                    rule_obj = {'field': field, 'cat': cat}
+                    
+                    if 'mandatory' in rule: 
+                        req_dict['Mandatory'].append(rule_obj) # Append Dictionary
+                    if 'empty' in rule: 
+                        req_dict['Empty'].append(rule_obj)     # Append Dictionary
 
     # --- 2. HARDCODED LOGIC & COLUMN MAPPING ---
     valid_vendor_ids = set()
@@ -334,12 +347,20 @@ def run_smd_analysis(df, requirements_df, target_cocd, target_porg, region):
         is_local = (country == 'MY')
 
         # --- A. Apply Dynamic Rules (Excel) ---
-        for field in req_dict['Mandatory']:
-            if field in df.columns and not check_mandatory(row[field]):
-                log_err(gen, f"{field} is missing", field, index)
-        for field in req_dict['Empty']:
-            if field in df.columns and not check_must_be_empty(row[field]):
-                log_err(gen, f"{field} must be empty", field, index)
+        def get_target_list(cat_name):
+            c = cat_name.lower()
+            if 'purchasing' in c: return p1
+            if 'org' in c or 'finance' in c: return p2
+            if 'master' in c or 'vendor' in c: return p3
+            return gen # default
+        
+        for item in req_dict['Mandatory']:
+            target_list = get_target_list(item['cat'])
+            if item['field'] in df.columns and not check_mandatory(row[item['field']]):
+                log_err(target_list, f"{item['field']} is missing", item['field'], index)
+        for item in req_dict['Empty']:
+            if item['field'] in df.columns and not check_must_be_empty(row[item['field']]):
+                log_err(target_list, f"{item['field']} must be empty", item['field'], index)
 
         # --- B. Hardcoded Business Logic (Things too complex for simple Excel rules) ---
 
@@ -368,7 +389,12 @@ def run_smd_analysis(df, requirements_df, target_cocd, target_porg, region):
         if 'CoCd' in df.columns and str(row['CoCd']).strip() != target_cocd: log_err(p2, f"CoCd != {target_cocd}", 'CoCd', index)
         if 'POrg' in df.columns:
             porg = str(row['POrg']).strip()
-            if target_porg and check_mandatory(porg) and porg != target_porg: log_err(p2, f"POrg != {target_porg}", 'POrg', index)
+            if valid_porg_list:
+                if check_mandatory(porg):
+                    if porg not in valid_porg_list: 
+                        log_err(p2, f"POrg != {valid_porg_list}", 'POrg', index)
+                else:
+                    log_err(p2, "POrg is missing", 'POrg', index)
 
         # 5. Tax Logic (At least 1 required)
         tax_candidates = [c for c in df.columns if ('tax' in c.lower() or 'vat' in c.lower()) 
@@ -390,14 +416,17 @@ def run_smd_analysis(df, requirements_df, target_cocd, target_porg, region):
             if check_mandatory(alt) and alt not in valid_vendor_ids:
                 log_err(p3, "AltPayee Not in Scope", 'AltPayeeAc', index)
         
-        # 8. Telephone 1 & "+" for MY ONLY
+        # 8. Telephone 1 logic
         if 'Telephone 1' in df.columns:
             phone = str(row['Telephone 1']).strip()
-            if is_local:  # Logic: IF Country is 'MY'
-                if not check_mandatory(phone): 
-                    log_err(gen, "Tel 1 missing", 'Telephone 1', index)
-                elif "+" not in phone: 
-                    log_err(gen, "Tel 1 missing '+'", 'Telephone 1', index)
+
+            # Rule 1: Mandatory for Global
+            if not check_mandatory(phone): 
+                log_err(gen, "Tel 1 missing", 'Telephone 1', index)
+            
+            # Rule 2: "+" symbol only for CoCd 3072
+            elif str(target_cocd).strip() == '3072' and "+" not in phone: 
+                log_err(gen, "Tel 1 missing '+'", 'Telephone 1', index)
                     
         # 9. Synertrade Supplier ID
         if 'Synertrade Supplier ID' in df.columns:
@@ -499,6 +528,7 @@ def to_excel_email_download(df_result, metrics_dict):
 
         # High level metrics
         ws0.write('B2', "Email Validation Summary", header_format)
+        ws0.write('C2', "Count", header_format)
         ws0.write('B3', "Total Records", bold_format)
         ws0.write('C3', metrics_dict['Total'])
         ws0.write('B4', "Correct Records", bold_format)
@@ -534,92 +564,511 @@ def to_excel_email_download(df_result, metrics_dict):
 # 5. PO ANALYSIS LOGIC 
 # ==========================================
 
-def run_po_analysis(df, requirements_df): 
-    """
-    Dynamic PO Validation based on Uploaded Rules. 
-    Rules structure: Field, Rule, Category, Error_Message 
-    """
+def load_po_config(config_file):
+    """Reads the Excel config and returns dictionaries/sets of rules"""
+    config = {}
+    try: 
+        xls = pd.ExcelFile(config_file)
 
+        # Load logic matrix 
+        if 'PO_Logic_Matrix' in xls.sheet_names:
+            df_matrix = pd.read_excel(xls, 'PO_Logic_Matrix').fillna('')
+            config['matrix'] = df_matrix.to_dict('records')
+
+        # Load settings (single values)
+        if 'Settings' in xls.sheet_names: 
+            df_set = pd.read_excel(xls, 'Settings')
+            # convert two columns into a dictionary: {parameter: value}
+            config['settings'] = dict(zip(df_set.iloc[:,0], df_set.iloc[:,1]))
+
+            # Load Doc Type Rules
+            if 'Doc_Type_Rules' in xls.sheet_names:
+                df_doc = pd.read_excel(xls, 'Doc_Type_Rules')
+                # create list of types that require material 
+                config['req_material'] = set(df_doc[df_doc['Requires_Material'] == 'Yes'].iloc[:,0].astype(str).str.strip())
+                # create list of types that must not have material 
+                config['no_material'] = set(df_doc[df_doc['Requires_Material'] == 'No'].iloc[:,0].astype(str).str.strip())
+
+            # Standard Rules 
+            if 'Standard_Rules' in xls.sheet_names:
+                df_std = pd.read_excel(xls, 'Standard_Rules')
+                config['standard'] = df_std.to_dict('records')
+            
+            # Reference lists 
+            # Load lists
+            list_map = {
+                'PCN List': 'valid_pcn',
+                'UNSPSC List': 'valid_unspsc',
+                'UOM Master': 'valid_uom',
+                'Active List': 'active_vendors', 
+                'Suppress Vendors': 'suppress_vendors',
+                'Payment Terms': 'valid_payt'
+            }
+            for sheet, key in list_map.items(): 
+                if sheet in xls.sheet_names:
+                    df = pd.read_excel(xls, sheet)
+                    config[key] = set(df.iloc[:, 0].dropna().astype(str).str.strip())
+                
+    except Exception as e: 
+        st.error(f"Error reading PO config: {e}")
+        
+    return config
+
+def check_special_characters(text, banned_chars_list):
+    if pd.isna(text):
+        return None
+
+    text = str(text)
+
+    for char in banned_chars_list:
+        if char == '&':
+            continue # skip '&' here to run the custom logic below
+        if char in text: 
+            return f"Contains banned character: '{char}'"
+    if '</' in text or '/>' in text: 
+        return "Invalid XML tags"
+    if '&' in text: 
+        # Rule: Only flag if the text is trapped between 2 &s without spaces (e.g. &text&)
+        # Regex explanation: 
+        # &     : Literal &
+        # [^ ]+ : One or more characters that have no spaces
+        # &     : Literal &
+        if re.search(r'&[^ ]+&', text): 
+            return "Invalid format '&text&'"
+    if '•' in text:
+        return "Contains Bullet point"
+    if '→' in text: 
+        return "Contains Arrow symbol"
+    return None 
+
+def check_intercompany_vendor(vendor_id):
+    if pd.isna(vendor_id): 
+        return False
+    return bool(re.match(r'^A\d{4}', str(vendor_id)))
+
+def run_po_analysis_dynamic(df, config_file): 
     df_out = df.copy()
     df.columns = df.columns.str.strip()
 
-    # Parse rules
-    req_dict = {'Mandatory': [], 'Numeric': [], 'NoSpecial': []}
+    # Load the rules from Excel 
+    rules = load_po_config(config_file)
+    settings = rules.get('settings', {})
+    # Load the matrix logic
+    matrix = rules.get('matrix', []) 
 
-    if requirements_df is not None: 
-        requirements_df.columns = [c.strip().title() for c in requirements_df.columns]
-        if 'Field' in requirements_df.columns and 'Rule' in requirements_df.columns: 
-            for idx, row in requirements_df.iterrows(): 
-                field = str(row['Field']).strip()
-                rule = str(row['Rule']).strip()
-                cat = str(row['Category']).strip() if 'Category' in requirements_df.columns else 'General'
-                msg = str(row['Error_Message']).strip() if 'Category' in requirements_df.columns else f"{field} Error"
+    # Parse Settings
+    no_dec = str(settings.get('No_Decimal_Currencies', 'JPY,KRW,IDR')).split(',')
+    special_chars = str(settings.get('Banned_Chars', '</,/>,&')).split(',')
 
-                rule_obj = {'field': field, 'cat': cat, 'msg': msg}
+    # Integer/Float settings with defaults 
+    def get_setting_int(key, default):
+        try: return int(float(settings.get(key, default)))
+        except: return default
+    
+    max_short = get_setting_int('Max_Short_Text_Length', 40)
+    max_req = get_setting_int('Max_Requestor_Length', 12)
+    max_prep = get_setting_int('Max_Preparer_Length', 12)
+    max_unload = get_setting_int('Max_Unloading_Pt_Length', 25)
+    
+    try: 
+        small_val_limit = float(settings.get('Small Value Limit', 10.0))
+    except: 
+        small_val_limit = 10.0
 
-                if 'mandatory' in rule: req_dict['Mandatory'].append(rule_obj)
-                if 'numeric' in rule or 'greaterthan' in rule: 
-                    req_dict['Numeric'].append(rule_obj)
-                    # add more logic if needed
+    # Banned requestors 
+    banned_reqs = [x.strip() for x in str(settings.get('Banned_Requestors', '')).split(',') if x.strip()]
 
-    # Iterate rows 
     all_error_details = []
+    # initialize lists for output
+    po_categories = []
+    po_statuses = []
+    po_remarks = []
+
+    # Dynamic categories lists
+    cat_errors = {
+        'PCN': [], 
+        'Unit of Measurement': [], 
+        'Requestor': [], 
+        'Preparer': [],
+        'Split Accounting': [],
+        'Text': [],
+        'Currency': [],
+        'Schedule Line': [],
+        'Vendor': [], 
+        'Unloading Point': [],
+        'Doc Type': [],
+        'Payment Term': [],
+        'FOC': [],
+        'Logic Checks': [],
+        'Additional Pricing': [],
+        'Incoterm': []
+    }
     bad_cells = []
 
-    # Dynamic category dictionaries to store errors per category
-    category_map = {}
+    def log_po(cat, msg, col, idx): 
+       # Safety: if the category doesn't exist, default to put in Logic Check
+       target_cat = cat if cat in cat_errors else 'Logic Checks'
+       cat_errors[target_cat].append(msg)
+       if col in df.columns: bad_cells.append((idx, col))
 
-    for index, row in df.iterrows(): 
-        row_errors = []
-
-        # helper
-        def log_po_err(msg, col, cat): 
-            row_errors.append(msg)
-            bad_cells.append((index, col))
-            # store in category specific list for later split 
-            if index not in category_map: 
-                category_map[index] = {}
-            if cat not in category_map[index]: 
-                category_map[index][cat] = []
-                category_map[index][cat].append(msg)
-        
-        # Mandatory Checks 
-        for item in req_dict['Mandatory']: 
-            if item['field'] in df.columns and not check_mandatory(row[item['field']]): 
-                log_po_err(item['msg'], item['field'], item['cat'])
-        
-        # Numeric checks (>0)
-        for item in req_dict['Numeric']: 
-            if item['field'] in df.columns:
-                val = row[item['field']]
-                if check_mandatory(val): 
-                    try: 
-                        if float(val) <= 0: 
-                            log_po_err(item['msg'], item['field'], item['cat'])
-                    except: 
-                        log_po_err(f"{item['field']} must be numeric", item['field'], item['cat'])
-        
-        all_error_details.append(" | ".join(row_errors))
-
-    # Add columns to DF
-    # need to find all unique categories used 
-    all_cats = set()
-    if requirements_df is not None and 'Category' in requirements_df.columns: 
-        all_cats = set(requirements_df['Category'].dropna().unique())
-    else: 
-        all_cats = {'General'}
+    # Helper for safe float
+    def safe_float(val):
+        if pd.isna(val) or str(val).strip() in ['-', '', 'nan']: return 0.0
+        try:
+            # remove comma if it's thousands separator
+            clean_val = str(val).replace(',', '')
+            return float(clean_val)
+        except: return 0.0
     
-    for cat in all_cats:
-        cat_col_name = f"{cat}_Errors"
-        cat_values = []
-        for i in range(len(df)):
-            if i in category_map and cat in category_map[i]: 
-                cat_values.append(" | ".join(category_map[i][cat]))
-            else: 
-                cat_values.append("")
-        df_out.insert(0, cat_col_name, cat_values)
+    # --- Intelligent column finder ---
+    # finds all column ignoring case and slight name variations
+    def get_val_fuzzy(row, potential_names):
+        # Try exact matches first
+        for name in potential_names:
+            if name in df.columns: return row[name]
+        
+        # Try case-insensitive matches
+        col_map = {c.lower().replace(' ', '').replace('_', '').replace('.', ''): c for c in df.columns}
+        for name in potential_names:
+            # normalize candidate name
+            clean_name = name.lower().replace(' ', '').replace('_', '').replace('.', '')
+            if clean_name in col_map:
+                return row[col_map[clean_name]]
+        
+        return "", None # Not found
+
+    for idx, row in df.iterrows():
+        # Reset row errors
+        for k in cat_errors: cat_errors[k] = [] # Reset the temp list for this row 
+
+        # --- Apply the matrix logic ---
+        # Extract values for matrix
+        gr_val = str(get_val_fuzzy(row, ['GR', 'G/R', 'Goods Receipt'])).strip().upper()
+        # material: check if empty (some files use '0' or '0000' as empty)
+        mat_raw = str(get_val_fuzzy(row, ['Material', 'Material Number', 'Mat. No.'])).strip()
+        mat_val = "" if mat_raw in ['0', '00000000', 'nan',''] else mat_raw
+        po_type = str(get_val_fuzzy(row, ['Type', 'Doc Type'])).strip()        
+
+        # Robust value fetching
+        net_price = safe_float(get_val_fuzzy(row, ['Net Price_Ori', 'Net price_ori', 'Net Price', 'net price']))
+        still_del = safe_float(get_val_fuzzy(row, ['Still to Del Quantity', 'Still to del quantity', 'Still to Deliver']))
+        still_pay_qty = safe_float(get_val_fuzzy(row, ['Still to Pay Quantity', 'Still to pay quantity', 'Still to Pay']))
+        still_pay_amt = safe_float(get_val_fuzzy(row, ['Still to pay amt ori', 'Still to Pay Amt Ori', 'Still to Pay Amount']))
+        ir_exist_val = str(get_val_fuzzy(row, ['IR_Exist', 'IR Exist', 'IR Indicator'])).strip().upper()
+        d_item = str(get_val_fuzzy(row, ['D-Item', 'Deletion Indicator'])).strip().upper()
+        incomplete = str(get_val_fuzzy(row, ['Incomplete'])).strip().upper()
+        rel_ind = str(get_val_fuzzy(row, ['Rel', 'Release Indicator'])).strip().upper()
+        dci = str(get_val_fuzzy(row, ['DCI', 'Delivery Complete'])).strip().upper()
+        fin = str(get_val_fuzzy(row, ['FIN', 'Final Invoice'])).strip().upper()
+        rebate = str(get_val_fuzzy(row, ['R', 'Rebate', 'Return Item'])).strip().upper()
+
+        # --- DETERMINE CATEGORY ---
+        # Logic: 
+        # If GR = 'X' -> Material PO (Indirect)
+        # If GR = Empty -> Service PO (Indirect)
+
+        # default category
+        p_cat = "Unknown"
+        
+        # determine category first (fallback if matrix fails)
+        if mat_val != "": p_cat = "Direct PO" # Fallback if a Direct PO slipped in
+        elif gr_val == 'X': p_cat = "Material PO"
+        else: p_cat = "Service PO"
+
+        # default status
+        p_stat = "Review"
+        p_rem = "No matching logic found"
+
+        # --- APPLY MATRIX LOGIC ---
+        rule_found = False
+
+        # Loop through the matrix rules from excel 
+        for rule in matrix: 
+            match = True
+
+            # Check Category match 
+            rule_cat = str(rule.get('Category', '')).strip()
+            if rule_cat and rule_cat != p_cat:
+                match = False
+
+            # Check GR Flag (X or Empty)
+            if match:
+                r_gr = str(rule.get('GR', '')).strip().upper()
+                if r_gr == 'X' and gr_val != 'X': 
+                    match = False
+                if r_gr == 'Empty' and gr_val != '':
+                    match = False
+            
+            # Check material flag (filled or empty)
+            if match: 
+                r_mat = str(rule.get('Material', '')).strip().upper()
+                if r_mat == 'Filled' and mat_val == '': 
+                    match = False
+                if r_mat == 'Empty' and mat_val != '': 
+                    match = False
+            
+            # Check conditions 
+            # clean spaces and uppercase: "Price = 0" -> "PRICE=0"
+            if match:
+                r_cond = str(rule.get('Conditions', '')).strip().upper().replace(' ', '')
+                if r_cond:
+                    conds = r_cond.split(',')
+                    for c in conds: 
+                        if 'PRICE=0' in c and net_price != 0: 
+                            match = False
+                        if 'PRICE>0' in c and net_price <= 0:
+                            match = False
+                        if 'DEL=0' in c and still_del != 0:
+                            match = False
+                        if 'DEL>0' in c and still_del <= 0:
+                            match = False
+                        if 'PAYQTY=0' in c and still_pay_qty != 0:
+                            match = False
+                        if 'PAYQTY>0' in c and still_pay_qty <= 0:
+                            match = False
+                        if 'PAYQTY<0' in c and still_pay_qty >= 0:
+                            match = False
+                        if 'PAYAMT=0' in c and still_pay_amt != 0:
+                            match = False
+                        if 'PAYAMT>0' in c and still_pay_amt <= 0:
+                            match = False
+                        if 'PAYAMT<0' in c and still_pay_amt >= 0: 
+                            match = False
+                        if 'IR_EXIST=' in c:
+                            target = c.split('=')[1]
+                            # Normalized comparison
+                            check_val = ir_exist_val.replace('.', '').replace(' ', '') # F.O.C. -> FOC
+                            target_clean = target.replace('.', '').replace(' ', '')
+                            if check_val != target_clean: match = False
+            
+            if match: 
+                p_stat = rule.get('Status', '')
+                p_rem = rule.get('Remark', '')
+                rule_found = True
+                break # stop at the first match 
+        
+        # --- HARDCODED OVERRIDES (Filter Rules) ---
+        # Priority over this matrix result if they exist
+        if not rule_found: 
+            pass
+        
+        # deleted items are always closed
+        if d_item == 'L':
+            p_stat = 'Closed'
+            p_rem = 'Deleted Item. PO line item closed. No further action is required.'
+        
+        # Incomplete 
+        elif incomplete == 'X':
+            p_stat = 'Closed'
+            p_rem = 'Incomplete/on hold item. PO line item closed. No further action is required.'
+        
+        # Release
+        elif rel_ind in ['Z', 'P']:
+            p_stat = 'Closed'
+            p_rem = 'Blocked item. PO line item closed. No further action is required.'
+
+        # DCI + FIN
+        elif dci == 'X' and fin == 'X':
+            p_stat = 'Closed'
+            p_rem = 'PO closed due to final invoice ticked and delivery completed ticked, no further action required.'
+        
+        # delivery complete
+        elif dci == 'X': 
+            p_stat = 'Closed'
+            p_rem = 'Delivery Completed ticked, no further action required.'
+        
+        # Final Invoice
+        elif fin == 'X':
+            p_stat = 'Closed'
+            p_rem = 'Final invoice ticked, no further action required.'
+
+        # rebate
+        elif rebate == 'X':
+            p_stat = 'Closed'
+            p_rem = 'Rebate or Return Item, no further action required.'
+
+        # Save matrix results
+        po_categories.append(p_cat)
+        po_statuses.append(p_stat)
+        po_remarks.append(p_rem)
+
+        # Run only to check PO that have status "OPEN" OR "CHECK WITH LOCAL"
+        if p_stat in ['Open', 'Check with Local']:
+            # --- PCN ---
+            matl_group = str(get_val_fuzzy(row, ['Matl Group', 'Material Group'])).strip()
+            vendor = str(get_val_fuzzy(row, ['Vendor', 'Supplier'])).strip()
+
+            if check_intercompany_vendor(vendor):
+                if matl_group != 'I9999': log_po('PCN', "Intercompany PO not using PCN I9999", 'Matl Group', idx)
+        
+            if 'valid_pcn' in rules and matl_group not in rules ['valid_pcn']:
+                log_po('PCN', "PCN not in PCN tool", 'Matl Group', idx)
+        
+            if 'valid_unspsc' in rules and matl_group not in rules['valid_unspsc']:
+                log_po('PCN', "PCN not in UNSPSC List", 'Matl Group', idx)
+        
+            # --- UOM ---
+            oun = str(get_val_fuzzy(row, ['OUn', 'Order Unit'])).strip()
+            po_uom_ext = str(get_val_fuzzy(row, ['PO UOM - Ext'])).strip()
+            unit_price_order = str(get_val_fuzzy(row, ['Order Price Unit (Purchasing)'])).strip()
+
+            if oun != po_uom_ext: log_po('Unit of Measurement', "OUn != PO UOM - Ext", 'OUn', idx)
+            if po_uom_ext != unit_price_order: log_po('Unit of Measurement', "PO UOM - Ext != Order Price Unit", 'PO UOM - Ext', idx)
+
+            if 'valid_uom' in rules and po_uom_ext not in rules['valid_uom']:
+                log_po('Unit of Measurement', "UOM not in MyBuy", 'PO UOM - Ext', idx)
+        
+            # --- REQUESTOR ---
+            req = str(get_val_fuzzy(row, ['Requestor'])).strip()
+            if req in banned_reqs: log_po('Requestor', "Requestor is PROC SSC colleague", 'Requestor', idx)
+            if len(req) > max_req: log_po('Requestor', f"Requestor user ID exceeding {max_req} characters", 'Requestor', idx)
+
+            # --- PREPARER ---
+            prep = str(get_val_fuzzy(row, ['Preparer'])).strip()
+            if len(prep) > max_prep: log_po('Preparer', f"Preparer user ID exceeding {max_prep} characters", 'Preparer', idx)
+
+            # --- SPLIT ACCOUNTING (SAA) ---
+            saa_val = safe_float(get_val_fuzzy(row, ['SAA', 'Split']))
+            if saa_val > 1:
+                # Check if Material or Service PO to give specific remark
+                if mat_val != "": log_po('Split Accounting', "Material SAA > 1", 'SAA', idx)
+                else: log_po('Split Accounting', "Service SAA > 1", 'SAA', idx)
+        
+            # --- TEXT ---
+            # dynamic check for all columns containing the specific keywords we looking for
+            for col in df.columns:
+                c_lower = col.lower()
+                val = str(row[col]).strip()
+
+                # All Header Comments
+                if 'header comment' in c_lower:
+                    if len(val) > 4000: log_po('Text', f"{col} > 4000 characters", col, idx)
+                    err = check_special_characters(val, special_chars)
+                    if err:
+                        log_po('Text', f"{col} : {err}", col, idx)
+                
+                # All Item Comments
+                if 'item comment' in c_lower:
+                    if len(val) > 4000: log_po('Text', f"{col} > 4000 characters", col, idx)
+                    err = check_special_characters(val, special_chars)
+                    if err: 
+                        log_po('Text', f"{col}: {err}", col, idx)
+                
+            # Short text
+            short = str(row['Short Text']).strip()
+            if len(short) > max_short: log_po('Text', f"Exceeds {max_short} characters", 'Short Text', idx)
+            err_short = check_special_characters(short, special_chars)
+            if err_short:
+                log_po('Text', f"Short Text: {err_short}", 'Short Text', idx)
+
+            # Vendor Material Number
+            ven_mat = str(row['Vendor Material Number']).strip()
+            err_ven = check_special_characters(ven_mat, special_chars)
+            if err_ven:
+                log_po('Text', f"Vendor Material Number: {err_ven}", 'Vendor Material Number', idx)
+
+            # --- CURRENCY ---
+            # Rule 1: Check for Curr. vs Net price ori
+            curr1 = str(get_val_fuzzy(row, ['Curr.', 'Curency'])).strip().upper()
+            if curr1 in no_dec and net_price % 1 != 0:
+                log_po('Currency', "Currency with decimal error", 'Net Price_Ori', idx)
+        
+            # Rule 2: Check for Crcy vs Unit price
+            curr2 = str(get_val_fuzzy(row, ['Crcy'])).strip().upper()
+            unit_price = safe_float(get_val_fuzzy(row, ['Unit Price']))
+            if curr2 in no_dec and unit_price % 1 != 0:
+                log_po('Currency', "Currency with decimal error", 'Unit Price', idx)
+        
+            # --- SCHEDULE LINE ---
+            schd = safe_float(get_val_fuzzy(row, ['Schd.', 'Schedule Line']))
+            if schd > 1:
+                log_po('Schedule Line', "Schedule line more than one per item", 'Schd.', idx)
+        
+            # --- VENDOR ---
+            if 'active_vendors' in rules and vendor not in rules['active_vendors']:
+                log_po('Vendor', "Invalid supplier", 'Vendor', idx)
+            if check_intercompany_vendor(vendor):
+                log_po('Vendor', "Intercompany PO", 'Vendor', idx)
+        
+            slm = str(get_val_fuzzy(row, ['Supplier SLMID', 'SLM ID'])).strip()
+            if not check_mandatory(vendor) or not check_mandatory(slm):
+                log_po('Vendor', "No supplier SLM ID", 'Supplier SLMID', idx)
+        
+            if 'suppress_vendors' in rules and vendor in rules['suppress_vendors']:
+                log_po('Vendor', "Suppress PO supplier", 'Vendor', idx)
+        
+            # --- UNLOADING POINT ---
+            unload = str(get_val_fuzzy(row, ['Unloading Point - Ext'])).strip()
+            # Only for unloading point, custom check where "NA" consider as correct value
+            if unload == "" or unload.lower() == 'nan':
+                log_po('Unloading Point', "Empty unloading point", 'Unloading Point - Ext', idx)
+            elif len(unload) > max_unload: log_po('Unloading Point', f"Exceeds {max_unload} characters", 'Unloading Point - Ext', idx)
+
+            # --- DOC TYPE ---
+            if po_type in rules.get('req_material', set()) and mat_val == "":
+                log_po('Doc Type', "Direct PO DOC Type without material number", 'Type', idx)
+            if po_type in rules.get('no_material', set()) and mat_val != "":
+                log_po('Doc Type', "Indirect PO DOC Type with material number", 'Type', idx)
+
+            # --- PAYMENT TERM ---
+            payt = str(get_val_fuzzy(row, ['PayT', 'Payment Term'])).strip()
+            if 'valid_payt' in rules and payt not in rules['valid_payt']:
+                log_po('Payment Term', "Payment term not in MyBuy", 'PayT', idx)
+        
+            # --- FOC ---
+            if ir_exist_val in ['FOC', 'F.O.C.'] and still_pay_qty < 1:
+                log_po('FOC', "FOC Service item < 1", 'Still to pay quantity', idx)
+        
+            # --- LOGIC CHECKS --- 
+            if still_pay_amt > 0:
+                pass
+            if still_pay_amt < 0:
+                log_po('Logic Checks', "Negative still to pay amount", 'Still to pay amt_ori', idx)
+        
+            # Open amount without quantity (Service)
+            if mat_val == "" and still_pay_qty == 0 and still_pay_amt > 0:
+                log_po('Logic Checks', "Have open amount, but without open quantity (Service)", 'Still to pay amt_ori', idx)
+        
+            # Open amount without quantity (Material Non-FOC)
+            if mat_val != "" and ir_exist_val not in ['FOC', 'F.O.C.']:
+                if still_del > 0 and still_pay_qty > 0 and still_pay_amt < 0: 
+                    log_po('Logic Checks', "Have open amount, but without open quantity (Material)", 'Still to pay amt_ori', idx)
+        
+            # Small value
+            still_pay_amt_eur = safe_float(get_val_fuzzy(row, ['Still to pay amt eur', 'Still to Pay Amt Eur']))
+            if 0 < still_pay_amt_eur <= small_val_limit:
+                log_po('Logic Checks', f"PO open invoice value < {small_val_limit} EUR", 'Still to pay amt_eur', idx)
+        
+            # --- INCOTERM ---
+            incot = str(get_val_fuzzy(row, ['IncoT', 'Incoterm'])).strip()
+            if not check_mandatory(incot):
+                log_po('Incoterm', "Incoterm is missing", 'IncoT', idx)
+        
+            # --- Additional Pricing ---
+            per = safe_float(get_val_fuzzy(row, ['Per']))
+            if per > 1:
+                log_po('Additional Pricing', "Additional pricing (Per > 1)", 'Per', idx)
+
+        # --- CONSOLIDATE ---
+        combined_errs = []
+        for cat, err_list in cat_errors.items():
+            if err_list: 
+                combined_errs.extend(err_list)
+                # add specific column to dataframe 
+                col_name = f"{cat}_Remarks"
+                if col_name not in df_out.columns: 
+                    df_out[col_name] = "" # init if new 
+                df_out.at[idx, col_name] = " | ".join(err_list)
+
+        all_error_details.append(" | ".join(combined_errs))
     
-    return df_out, bad_cells, list(all_cats)
+    # Add error column 
+    df_out.insert(0, 'Error_Details', all_error_details)
+    df_out.insert(0, 'Remarks', po_remarks)
+    df_out.insert(0, 'PO Status', po_statuses)
+    df_out.insert(0, 'PO Category', po_categories)
+
+    return df_out, bad_cells, list(cat_errors.keys())
 
 def to_excel_po_download(full_df, bad_cells, category_list):
     output = io.BytesIO()
@@ -632,38 +1081,50 @@ def to_excel_po_download(full_df, bad_cells, category_list):
         # metrics calculation 
         total = len(full_df)
         errors = len(full_df[full_df['Error_Details'] != ""])
-        correct = total - errors
 
         # Dashboard 
         ws0 = workbook.add_worksheet('Dashboard_Summary')
         ws0.write('B2', "PO Analysis Summary", header_format)
+        ws0.write('C2', "Count", header_format)
         ws0.write('B3', "Total Records", bold_format)
         ws0.write('C3', total)
         ws0.write('B4', "Records with Errors", bold_format)
         ws0.write('C4', errors)
 
         # Breakdown
-        ws0.write('B7', "Errors by Category", header_format)
-        ws0.write('C7', "Count", header_format)
-        r = 8 
+        r = 7
+        ws0.write('B6', "Errors by Category", header_format)
+        ws0.write('C6', "Count", header_format)
         for cat in category_list: 
-            col_name = f"{cat}_Errors"
+            col_name = f"{cat}_Remarks"
             if col_name in full_df.columns: 
-                count = len(full_df[full_df[col_name] != ""])
+                count = len(full_df[full_df[col_name].str.strip() != ""])
                 ws0.write(r, 1, cat)
                 ws0.write(r, 2, count)
                 r += 1
+        
+        # Breakdown by status
+        r += 2
+        ws0.write(r, 1, "Breakdown by Status", header_format)
+        ws0.write(r, 2, "Count", header_format)
+        r += 1
+        if 'PO Status' in full_df.columns:
+            status_counts = full_df['PO Status'].value_counts()
+            for status, count in status_counts.items():
+                ws0.write(r, 1, status)
+                ws0.write(r, 2, count)
+                r += 1
+
         ws0.set_column(1, 1, 40)
 
         # Raw Data
         # drop helper columns
-        drop_cols = ['Error_Details'] + [f"{c}_Errors" for c in category_list]
+        drop_cols = ['Error_Details'] + [f"{c}_Remarks" for c in category_list]
         clean_df = full_df.drop(columns=[c for c in drop_cols if c in full_df.columns])
-
         clean_df.to_excel(writer, index=False, sheet_name='Full_Raw_Data')
-        ws2 = writer.sheets['Full_Raw_Data']
+        ws1 = writer.sheets['Full_Raw_Data']
 
-        for i, col in enumerate(clean_df.columns): ws2.write(0, i, col, header_format)
+        for i, col in enumerate(clean_df.columns): ws1.write(0, i, col, header_format)
 
         # highlight cells 
         col_map = {name: i for i, name in enumerate(clean_df.columns)}
@@ -673,21 +1134,58 @@ def to_excel_po_download(full_df, bad_cells, category_list):
                 excel_row_idx = row_idx + 1
                 try: 
                     val = clean_df.iat[row_idx, excel_col_idx]
-                    if pd.isna(val): ws2.write_blank(excel_row_idx, excel_col_idx, None, red_foramt)
-                    else: ws2.write(excel_row_idx, excel_col_idx, val, red_foramt)
+                    if pd.isna(val): ws1.write_blank(excel_row_idx, excel_col_idx, None, red_foramt)
+                    else: ws1.write(excel_row_idx, excel_col_idx, val, red_foramt)
                 except: pass
-        ws2.freeze_panes(1, 0)
+        ws1.freeze_panes(1, 0)
 
-        # Categories
+        # Other sheets
+        # Errors Categories Tabs
         for cat in category_list: 
-            col_name = f"{cat}_Errors"
+            col_name = f"{cat}_Remarks"
             if col_name in full_df.columns: 
                 subset = full_df[full_df[col_name] != ""]
                 if not subset.empty: 
-                    # show the first 3 cols of raw data + error column
-                    preview_cols = list(clean_df.columns[:3]) + [col_name]
-                    subset[preview_cols].to_excel(writer, index=False, sheet_name=f"{cat}_Errors")
+                    # Raw data + ONLY the specific remark column
+                    # Remove other internal columns 
+                    base_data = subset.drop(columns=[c for c in drop_cols if c != col_name and c in subset.columns])
+
+                    # Move remark to front
+                    cols = [col_name] + [c for c in base_data.columns if c != col_name]
+                    final_view = base_data[cols]
+
+                    final_view.to_excel(writer, index=False, sheet_name=cat[:30]) # Sheet name limit 31 chars
+
+                    # Header format
+                    ws = writer.sheets[cat[:30]]
+                    for i, c in enumerate(final_view.columns): ws.write(0, i, c, header_format)
+                    ws.set_column(0, 0, 50)
+
+        # Status Tabs
+        if 'PO Status' in full_df.columns:
+            unique_statuses = full_df['PO Status'].unique()
+            for status in unique_statuses:
+                # Filter rows with this status 
+                status_subset = clean_df[clean_df['PO Status'] == status]
+
+                if not status_subset.empty:
+                    # clean sheet name (remove invalid characters)
+                    sheet_name = f"Status_{str(status)[:20]}".replace('/', '_')
+
+                    status_subset.to_excel(writer, index=False, sheet_name=sheet_name)
+
+                    # Apply formatting
+                    ws_stat = writer.sheets[sheet_name]
+                    for i, c in enumerate(status_subset.columns): ws_stat.write(0, i, c, header_format)
+                    ws_stat.set_column(0, len(status_subset.columns)-1, 15)
+                    ws_stat.freeze_panes(1, 3)
+
     return output.getvalue()
+
+
+# =================================
+# USER INTERFACE
+# =================================
 
 def main(): 
     with st.sidebar:
@@ -705,14 +1203,10 @@ def main():
             st.header("⚙️ Configuration")
             region_mode = st.radio("Region:", ["APAC", "EU"], horizontal=True)
             target_cocd = st.text_input("Target CoCd:", value="3072" if region_mode == "APAC" else "1040")
-            target_porg = st.text_input("Target POrg:", value="3072" if region_mode == "APAC" else "1040")
-
-    if task == "Home":
-        st.title("Procurement Workbench")
-        st.info("Select a module from the sidebar.")
+            target_porg = st.text_input("Target POrg:", value="3072" if region_mode == "APAC" else "1040", help="Enter multiple POrgs separated by commas.")
 
     # --- SMD ANALYSIS ---
-    elif task == "SMD Analysis": 
+    if task == "SMD Analysis": 
         st.title(f"SMD Validation ({region_mode})")
         
         st.subheader("1. Upload Rules Config (Optional)")
@@ -786,7 +1280,7 @@ def main():
                     all_dfs = []
                     for sheet_name in xls.sheet_names:
                         try: 
-                            sheet_df = pd.read_excel(po_raw_file, sheet_name=sheet_name, dtype=str)
+                            sheet_df = pd.read_excel(po_raw_file, sheet_name=sheet_name, dtype=str, keep_default_na=False, na_values=None)
                             all_dfs.append(sheet_df)
                         except: pass
                     
@@ -795,16 +1289,12 @@ def main():
                         st.stop()
 
                     df_po = pd.concat(all_dfs, ignore_index=True)
-                    rules_df = pd.read_excel(po_rules_file)
 
                     # Run dynamic PO engine
-                    res_po, bad_cells, cat_list = run_po_analysis(df_po, rules_df)
+                    res_po, bad_cells, cat_list = run_po_analysis_dynamic(df_po, po_rules_file)
 
                     err_count = len(res_po[res_po['Error_Details'] != ""])
                     st.metric("PO Lines with Errors", err_count)
-
-                    if err_count > 0:
-                        st.dataframe(res_po[res_po['Error_Details'] != ""].head())
 
                     data = to_excel_po_download(res_po, bad_cells, cat_list)
                     st.download_button("Download PO Report", data, "PO_Analysis_Report.xlsx")
@@ -853,4 +1343,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

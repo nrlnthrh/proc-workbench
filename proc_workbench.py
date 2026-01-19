@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np 
 import io
 import re
+import gc
 
 # ==========================================
 # 1. PAGE CONFIGURATION
@@ -647,6 +648,7 @@ def check_intercompany_vendor(vendor_id):
     return bool(re.match(r'^A\d{4}', str(vendor_id)))
 
 def run_po_analysis_dynamic(df, config_file): 
+    df = df.reset_index(drop=True)
     df_out = df.copy()
     df.columns = df.columns.str.strip()
 
@@ -1106,7 +1108,6 @@ def to_excel_po_download(full_df, bad_cells, category_list):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
         workbook = writer.book
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
-        # yellow_format = workbook.add_format({'bg_color': '#FFFFCC', 'border': 1}) # For Direct PO
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
         bold_format = workbook.add_format({'bold': True})
 
@@ -1171,6 +1172,9 @@ def to_excel_po_download(full_df, bad_cells, category_list):
                 except: pass
         ws1.freeze_panes(1, 0)
 
+        # Memory cleanup 
+        gc.collect()
+
         # Other sheets
         # Errors Categories Tabs
         for cat in category_list: 
@@ -1192,6 +1196,9 @@ def to_excel_po_download(full_df, bad_cells, category_list):
                     ws = writer.sheets[cat[:30]]
                     for i, c in enumerate(final_view.columns): ws.write(0, i, c, header_format)
                     ws.set_column(0, 0, 50)
+        
+        # Memory cleanup 
+        gc.collect()
 
         # Status Tabs
         if 'PO Status' in full_df.columns:

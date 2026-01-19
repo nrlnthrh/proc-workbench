@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np 
 import io
 import re
-import gc
 
 # ==========================================
 # 1. PAGE CONFIGURATION
@@ -1104,7 +1103,7 @@ def run_po_analysis_dynamic(df, config_file):
 
 def to_excel_po_download(full_df, bad_cells, category_list):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter', engine_kwargs={'options': {'constant_memory': True}}) as writer: 
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
         workbook = writer.book
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         # yellow_format = workbook.add_format({'bg_color': '#FFFFCC', 'border': 1}) # For Direct PO
@@ -1161,23 +1160,16 @@ def to_excel_po_download(full_df, bad_cells, category_list):
 
         # highlight cells 
         col_map = {name: i for i, name in enumerate(clean_df.columns)}
-
-        # only highlight if list is not huge to prevent timeout
-        if len(bad_cells) < 100000:
-            for row_idx, col_name in bad_cells:
-                if col_name in col_map: 
-                    excel_col_idx = col_map[col_name]
-                    excel_row_idx = row_idx + 1
-                    try: 
-                        val = clean_df.iat[row_idx, excel_col_idx]
-                        if pd.isna(val): ws1.write_blank(excel_row_idx, excel_col_idx, None, red_format)
-                        else: ws1.write(excel_row_idx, excel_col_idx, val, red_format)
-                    except: pass
+        for row_idx, col_name in bad_cells:
+            if col_name in col_map: 
+                excel_col_idx = col_map[col_name]
+                excel_row_idx = row_idx + 1
+                try: 
+                    val = clean_df.iat[row_idx, excel_col_idx]
+                    if pd.isna(val): ws1.write_blank(excel_row_idx, excel_col_idx, None, red_format)
+                    else: ws1.write(excel_row_idx, excel_col_idx, val, red_format)
+                except: pass
         ws1.freeze_panes(1, 0)
-
-        # Free memory
-        del clean_df
-        gc.collect()
 
         # Other sheets
         # Errors Categories Tabs
@@ -1201,9 +1193,6 @@ def to_excel_po_download(full_df, bad_cells, category_list):
                     for i, c in enumerate(final_view.columns): ws.write(0, i, c, header_format)
                     ws.set_column(0, 0, 50)
 
-                    del subset
-                    gc.collect()
-
         # Status Tabs
         if 'PO Status' in full_df.columns:
             unique_statuses = full_df['PO Status'].unique()
@@ -1222,9 +1211,6 @@ def to_excel_po_download(full_df, bad_cells, category_list):
                     for i, c in enumerate(status_subset.columns): ws_stat.write(0, i, c, header_format)
                     ws_stat.set_column(0, len(status_subset.columns)-1, 15)
                     ws_stat.freeze_panes(1, 3)
-
-                    del status_subset
-                    gc.collect()
 
     return output.getvalue()
 

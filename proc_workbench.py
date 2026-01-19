@@ -671,7 +671,8 @@ def run_po_analysis_dynamic(df, config_file):
     max_unload = get_setting_int('Max_Unloading_Pt_Length', 25)
     
     try: 
-        small_val_limit = float(settings.get('Small Value Limit', 10.0))
+        raw_val = settings.get('Small_Value_Limit', 10.0)
+        small_val_limit = float(str(raw_val).replace(',', ''))
     except: 
         small_val_limit = 10.0
 
@@ -709,7 +710,7 @@ def run_po_analysis_dynamic(df, config_file):
        # Safety: if the category doesn't exist, default to put in Logic Check
        target_cat = cat if cat in cat_errors else 'Logic Checks'
        cat_errors[target_cat].append(msg)
-       if col in df.columns: bad_cells.append((idx, col))
+       if col and col in df.columns: bad_cells.append((idx, col))
 
     # Helper for safe float
     def safe_float(val):
@@ -725,7 +726,7 @@ def run_po_analysis_dynamic(df, config_file):
     def get_val_fuzzy(row, potential_names):
         # Try exact matches first
         for name in potential_names:
-            if name in df.columns: return row[name]
+            if name in df.columns: return row[name], name
         
         # Try case-insensitive matches
         col_map = {c.lower().replace(' ', '').replace('_', '').replace('.', ''): c for c in df.columns}
@@ -733,7 +734,8 @@ def run_po_analysis_dynamic(df, config_file):
             # normalize candidate name
             clean_name = name.lower().replace(' ', '').replace('_', '').replace('.', '')
             if clean_name in col_map:
-                return row[col_map[clean_name]]
+                real_col = col_map[clean_name]
+                return row[real_col], real_col
         
         return "", None # Not found
 
@@ -743,24 +745,39 @@ def run_po_analysis_dynamic(df, config_file):
 
         # --- Apply the matrix logic ---
         # Extract values for matrix
-        gr_val = str(get_val_fuzzy(row, ['GR', 'G/R', 'Goods Receipt'])).strip().upper()
+        val, col_gr = get_val_fuzzy(row, ['GR', 'G/R', 'Goods Receipt'])
+        gr_val = str(val).strip().upper()
         # material: check if empty (some files use '0' or '0000' as empty)
-        mat_raw = str(get_val_fuzzy(row, ['Material', 'Material Number', 'Mat. No.'])).strip()
-        mat_val = "" if mat_raw in ['0', '00000000', 'nan',''] else mat_raw
-        po_type = str(get_val_fuzzy(row, ['Type', 'Doc Type'])).strip()        
+        val, col_mat = get_val_fuzzy(row, ['Material', 'Material Number', 'Mat. No.'])
+        mat_raw = str(val).strip()
+        mat_val = "" if mat_raw in ['0', '00000000', 'nan', ''] else mat_raw
+        val, col_type = get_val_fuzzy(row, ['Type', 'Doc Type'])
+        po_type = str(val).strip()        
 
         # Robust value fetching
-        net_price = safe_float(get_val_fuzzy(row, ['Net Price_Ori', 'Net price_ori', 'Net Price', 'net price']))
-        still_del = safe_float(get_val_fuzzy(row, ['Still to Del Quantity', 'Still to del quantity', 'Still to Deliver']))
-        still_pay_qty = safe_float(get_val_fuzzy(row, ['Still to Pay Quantity', 'Still to pay quantity', 'Still to Pay']))
-        still_pay_amt = safe_float(get_val_fuzzy(row, ['Still to pay amt ori', 'Still to Pay Amt Ori', 'Still to Pay Amount']))
-        ir_exist_val = str(get_val_fuzzy(row, ['IR_Exist', 'IR Exist', 'IR Indicator'])).strip().upper()
-        d_item = str(get_val_fuzzy(row, ['D-Item', 'Deletion Indicator'])).strip().upper()
-        incomplete = str(get_val_fuzzy(row, ['Incomplete'])).strip().upper()
-        rel_ind = str(get_val_fuzzy(row, ['Rel', 'Release Indicator'])).strip().upper()
-        dci = str(get_val_fuzzy(row, ['DCI', 'Delivery Complete'])).strip().upper()
-        fin = str(get_val_fuzzy(row, ['FIN', 'Final Invoice'])).strip().upper()
-        rebate = str(get_val_fuzzy(row, ['R', 'Rebate', 'Return Item'])).strip().upper()
+        val, col_price = get_val_fuzzy(row, ['Net Price_Ori', 'Net price_ori', 'Net Price', 'net price'])
+        net_price = safe_float(val)
+        val, col_del = get_val_fuzzy(row, ['Still to Del Quantity', 'Still to del qty', 'Still to Deliver'])
+        still_del = safe_float(val)
+        val, col_pay_qty = get_val_fuzzy(row, ['Still to Pay Quantity', 'Still to pay quantity', 'Still to Pay'])
+        still_pay_qty = safe_float(val)
+        val, col_pay_amt = get_val_fuzzy(row, ['Still to pay amt ori', 'Still to Pay Amt Ori', 'Still to Pay Amount'])
+        still_pay_amt = safe_float(val)
+        # Flags & Status Indicators
+        val, col_ir = get_val_fuzzy(row, ['IR_Exist', 'IR Exist', 'IR Indicator'])
+        ir_exist_val = str(val).strip().upper()
+        val, col_ditem = get_val_fuzzy(row, ['D-Item', 'Deletion Indicator'])
+        d_item = str(val).strip().upper()
+        val, col_inc = get_val_fuzzy(row, ['Incomplete'])
+        incomplete = str(val).strip().upper()
+        val, col_rel = get_val_fuzzy(row, ['Rel', 'Release Indicator'])
+        rel_ind = str(val).strip().upper()
+        val, col_dci = get_val_fuzzy(row, ['DCI', 'Delivery Complete'])
+        dci = str(val).strip().upper()
+        val, col_fin = get_val_fuzzy(row, ['FIN', 'Final Invoice'])
+        fin = str(val).strip().upper()
+        val, col_reb = get_val_fuzzy(row, ['R', 'Rebate', 'Return Item'])
+        rebate = str(val).strip().upper()
 
         # --- DETERMINE CATEGORY ---
         # Logic: 
@@ -768,7 +785,7 @@ def run_po_analysis_dynamic(df, config_file):
         # If GR = Empty -> Service PO (Indirect)
 
         # default category
-        p_cat = "Unknown"
+        p_cat = "Direct PO"
         
         # determine category first (fallback if matrix fails)
         if mat_val != "": p_cat = "Direct PO" # Fallback if a Direct PO slipped in
@@ -793,7 +810,7 @@ def run_po_analysis_dynamic(df, config_file):
 
             # Check GR Flag (X or Empty)
             if match:
-                r_gr = str(rule.get('GR', '')).strip().upper()
+                r_gr = str(rule.get('GR_Flag', '')).strip().upper()
                 if r_gr == 'X' and gr_val != 'X': 
                     match = False
                 if r_gr == 'Empty' and gr_val != '':
@@ -801,7 +818,7 @@ def run_po_analysis_dynamic(df, config_file):
             
             # Check material flag (filled or empty)
             if match: 
-                r_mat = str(rule.get('Material', '')).strip().upper()
+                r_mat = str(rule.get('Material_Flag', '')).strip().upper()
                 if r_mat == 'Filled' and mat_val == '': 
                     match = False
                 if r_mat == 'Empty' and mat_val != '': 
@@ -895,44 +912,52 @@ def run_po_analysis_dynamic(df, config_file):
         # Run only to check PO that have status "OPEN" OR "CHECK WITH LOCAL"
         if p_stat in ['Open', 'Check with Local']:
             # --- PCN ---
-            matl_group = str(get_val_fuzzy(row, ['Matl Group', 'Material Group'])).strip()
-            vendor = str(get_val_fuzzy(row, ['Vendor', 'Supplier'])).strip()
+            val, col_mg = get_val_fuzzy(row, ['Matl Group', 'Material Group'])
+            matl_group = str(val).strip()
+            val, col_ven = get_val_fuzzy(row, ['Vendor', 'Supplier'])
+            vendor = str(val).strip()
 
             if check_intercompany_vendor(vendor):
-                if matl_group != 'I9999': log_po('PCN', "Intercompany PO not using PCN I9999", 'Matl Group', idx)
+                if matl_group != 'I9999': log_po('PCN', "Intercompany PO not using PCN I9999", col_mg, idx)
         
             if 'valid_pcn' in rules and matl_group not in rules ['valid_pcn']:
-                log_po('PCN', "PCN not in PCN tool", 'Matl Group', idx)
+                log_po('PCN', "PCN not in PCN tool", col_mg, idx)
         
             if 'valid_unspsc' in rules and matl_group not in rules['valid_unspsc']:
-                log_po('PCN', "PCN not in UNSPSC List", 'Matl Group', idx)
+                log_po('PCN', "PCN not in UNSPSC List", col_mg, idx)
         
             # --- UOM ---
-            oun = str(get_val_fuzzy(row, ['OUn', 'Order Unit'])).strip()
-            po_uom_ext = str(get_val_fuzzy(row, ['PO UOM - Ext'])).strip()
-            unit_price_order = str(get_val_fuzzy(row, ['Order Price Unit (Purchasing)'])).strip()
+            val, col_oun = get_val_fuzzy(row, ['OUn', 'Order Unit'])
+            oun = str(val).strip()
+            val, col_pouom = get_val_fuzzy(row, ['PO UOM - Ext'])
+            po_uom_ext = str(val).strip()
+            val, col_uprice = get_val_fuzzy(row, ['Order Price Unit (Purchasing)', 'Order Price Unit'])
+            unit_price_order = str(val).strip()
 
-            if oun != po_uom_ext: log_po('Unit of Measurement', "OUn != PO UOM - Ext", 'OUn', idx)
-            if po_uom_ext != unit_price_order: log_po('Unit of Measurement', "PO UOM - Ext != Order Price Unit", 'PO UOM - Ext', idx)
+            if oun != po_uom_ext: log_po('Unit of Measurement', "OUn != PO UOM - Ext", col_oun, idx)
+            if po_uom_ext != unit_price_order: log_po('Unit of Measurement', "PO UOM - Ext != Order Price Unit", col_pouom, idx)
 
             if 'valid_uom' in rules and po_uom_ext not in rules['valid_uom']:
-                log_po('Unit of Measurement', "UOM not in MyBuy", 'PO UOM - Ext', idx)
+                log_po('Unit of Measurement', "UOM not in MyBuy", col_pouom, idx)
         
             # --- REQUESTOR ---
-            req = str(get_val_fuzzy(row, ['Requestor'])).strip()
-            if req in banned_reqs: log_po('Requestor', "Requestor is PROC SSC colleague", 'Requestor', idx)
-            if len(req) > max_req: log_po('Requestor', f"Requestor user ID exceeding {max_req} characters", 'Requestor', idx)
+            val, col_req = get_val_fuzzy(row, ['Requestor'])
+            req = str(val).strip()
+            if req in banned_reqs: log_po('Requestor', "Requestor is PROC SSC colleague", col_req, idx)
+            if len(req) > max_req: log_po('Requestor', f"Requestor user ID exceeding {max_req} characters", col_req, idx)
 
             # --- PREPARER ---
-            prep = str(get_val_fuzzy(row, ['Preparer'])).strip()
-            if len(prep) > max_prep: log_po('Preparer', f"Preparer user ID exceeding {max_prep} characters", 'Preparer', idx)
+            val, col_prep = get_val_fuzzy(row, ['Preparer'])
+            prep = str(val).strip()
+            if len(prep) > max_prep: log_po('Preparer', f"Preparer user ID exceeding {max_prep} characters", col_prep, idx)
 
             # --- SPLIT ACCOUNTING (SAA) ---
-            saa_val = safe_float(get_val_fuzzy(row, ['SAA', 'Split']))
+            val, col_saa = get_val_fuzzy(row, ['SAA', 'Split'])
+            saa_val = safe_float(val)
             if saa_val > 1:
                 # Check if Material or Service PO to give specific remark
-                if mat_val != "": log_po('Split Accounting', "Material SAA > 1", 'SAA', idx)
-                else: log_po('Split Accounting', "Service SAA > 1", 'SAA', idx)
+                if mat_val != "": log_po('Split Accounting', "Material SAA > 1", col_saa, idx)
+                else: log_po('Split Accounting', "Service SAA > 1", col_saa, idx)
         
             # --- TEXT ---
             # dynamic check for all columns containing the specific keywords we looking for
@@ -941,113 +966,119 @@ def run_po_analysis_dynamic(df, config_file):
                 val = str(row[col]).strip()
 
                 # All Header Comments
-                if 'header comment' in c_lower:
+                if 'header comment' in c_lower or 'item comment' in c_lower:
                     if len(val) > 4000: log_po('Text', f"{col} > 4000 characters", col, idx)
                     err = check_special_characters(val, special_chars)
                     if err:
                         log_po('Text', f"{col} : {err}", col, idx)
                 
-                # All Item Comments
-                if 'item comment' in c_lower:
-                    if len(val) > 4000: log_po('Text', f"{col} > 4000 characters", col, idx)
-                    err = check_special_characters(val, special_chars)
-                    if err: 
-                        log_po('Text', f"{col}: {err}", col, idx)
-                
             # Short text
-            short = str(row['Short Text']).strip()
-            if len(short) > max_short: log_po('Text', f"Exceeds {max_short} characters", 'Short Text', idx)
+            val, col_short = get_val_fuzzy(row, ['Short Text'])
+            short = str(val).strip()
+            if len(short) > max_short: log_po('Text', f"Exceeds {max_short} characters", col_short, idx)
             err_short = check_special_characters(short, special_chars)
             if err_short:
-                log_po('Text', f"Short Text: {err_short}", 'Short Text', idx)
+                log_po('Text', f"Short Text: {err_short}", col_short, idx)
 
             # Vendor Material Number
-            ven_mat = str(row['Vendor Material Number']).strip()
+            val, col_venmat = get_val_fuzzy(row, ['Vendor Material Number', 'Vendor Mat'])
+            ven_mat = str(val).strip()
             err_ven = check_special_characters(ven_mat, special_chars)
             if err_ven:
-                log_po('Text', f"Vendor Material Number: {err_ven}", 'Vendor Material Number', idx)
+                log_po('Text', f"Vendor Material Number: {err_ven}", col_venmat, idx)
 
             # --- CURRENCY ---
             # Rule 1: Check for Curr. vs Net price ori
-            curr1 = str(get_val_fuzzy(row, ['Curr.', 'Curency'])).strip().upper()
+            val, col_curr = get_val_fuzzy(row, ['Curr.', 'Curency', 'Currency'])
+            curr1 = str(val).strip().upper()
             if curr1 in no_dec and net_price % 1 != 0:
-                log_po('Currency', "Currency with decimal error", 'Net Price_Ori', idx)
+                log_po('Currency', "Currency with decimal error", col_price, idx)
         
             # Rule 2: Check for Crcy vs Unit price
-            curr2 = str(get_val_fuzzy(row, ['Crcy'])).strip().upper()
-            unit_price = safe_float(get_val_fuzzy(row, ['Unit Price']))
+            val, col_crcy = get_val_fuzzy(row, ['Crcy'])
+            curr2 = str(val).strip().upper()
+            val, col_unitp = get_val_fuzzy(row, ['Unit Price'])
+            unit_price = safe_float(val)
             if curr2 in no_dec and unit_price % 1 != 0:
-                log_po('Currency', "Currency with decimal error", 'Unit Price', idx)
+                log_po('Currency', "Currency with decimal error", col_unitp, idx)
         
             # --- SCHEDULE LINE ---
-            schd = safe_float(get_val_fuzzy(row, ['Schd.', 'Schedule Line']))
+            val, col_schd = get_val_fuzzy(row, ['Schd.', 'Schedule Line'])
+            schd = safe_float(val)
             if schd > 1:
-                log_po('Schedule Line', "Schedule line more than one per item", 'Schd.', idx)
+                log_po('Schedule Line', "Schedule line more than one per item", col_schd, idx)
         
             # --- VENDOR ---
             if 'active_vendors' in rules and vendor not in rules['active_vendors']:
-                log_po('Vendor', "Invalid supplier", 'Vendor', idx)
+                log_po('Vendor', "Invalid supplier", col_ven, idx)
             if check_intercompany_vendor(vendor):
-                log_po('Vendor', "Intercompany PO", 'Vendor', idx)
+                log_po('Vendor', "Intercompany PO", col_ven, idx)
         
-            slm = str(get_val_fuzzy(row, ['Supplier SLMID', 'SLM ID'])).strip()
+            val, col_slm = get_val_fuzzy(row, ['Supplier SLMID', 'SLM ID'])
+            slm = str(val).strip()
             if not check_mandatory(vendor) or not check_mandatory(slm):
-                log_po('Vendor', "No supplier SLM ID", 'Supplier SLMID', idx)
+                log_po('Vendor', "No supplier SLM ID", col_slm, idx)
         
             if 'suppress_vendors' in rules and vendor in rules['suppress_vendors']:
-                log_po('Vendor', "Suppress PO supplier", 'Vendor', idx)
+                log_po('Vendor', "Suppress PO supplier", col_ven, idx)
         
             # --- UNLOADING POINT ---
-            unload = str(get_val_fuzzy(row, ['Unloading Point - Ext'])).strip()
+            val, col_unload = get_val_fuzzy(row, ['Unloading Point - Ext'])
+            unload = str(val).strip()
             # Only for unloading point, custom check where "NA" consider as correct value
             if unload == "" or unload.lower() == 'nan':
-                log_po('Unloading Point', "Empty unloading point", 'Unloading Point - Ext', idx)
-            elif len(unload) > max_unload: log_po('Unloading Point', f"Exceeds {max_unload} characters", 'Unloading Point - Ext', idx)
+                log_po('Unloading Point', "Empty unloading point", col_unload, idx)
+            elif len(unload) > max_unload: log_po('Unloading Point', f"Exceeds {max_unload} characters", col_unload, idx)
 
             # --- DOC TYPE ---
             if po_type in rules.get('req_material', set()) and mat_val == "":
-                log_po('Doc Type', "Direct PO DOC Type without material number", 'Type', idx)
+                log_po('Doc Type', "Direct PO DOC Type without material number", col_type, idx)
             if po_type in rules.get('no_material', set()) and mat_val != "":
-                log_po('Doc Type', "Indirect PO DOC Type with material number", 'Type', idx)
+                log_po('Doc Type', "Indirect PO DOC Type with material number", col_type, idx)
 
             # --- PAYMENT TERM ---
-            payt = str(get_val_fuzzy(row, ['PayT', 'Payment Term'])).strip()
+            val, col_payt = get_val_fuzzy(row, ['PayT', 'Payment Term'])
+            payt = str(val).strip()
             if 'valid_payt' in rules and payt not in rules['valid_payt']:
-                log_po('Payment Term', "Payment term not in MyBuy", 'PayT', idx)
+                log_po('Payment Term', "Payment term not in MyBuy", col_payt, idx)
         
             # --- FOC ---
+            val, col_spq = get_val_fuzzy(row, ['Still to Pay Quantity', 'Still to pay qty'])
             if ir_exist_val in ['FOC', 'F.O.C.'] and still_pay_qty < 1:
-                log_po('FOC', "FOC Service item < 1", 'Still to pay quantity', idx)
+                log_po('FOC', "FOC Service item < 1", col_spq, idx)
         
             # --- LOGIC CHECKS --- 
             if still_pay_amt > 0:
                 pass
             if still_pay_amt < 0:
-                log_po('Logic Checks', "Negative still to pay amount", 'Still to pay amt_ori', idx)
+                log_po('Logic Checks', "Negative still to pay amount", col_pay_amt, idx)
         
             # Open amount without quantity (Service)
             if mat_val == "" and still_pay_qty == 0 and still_pay_amt > 0:
-                log_po('Logic Checks', "Have open amount, but without open quantity (Service)", 'Still to pay amt_ori', idx)
+                log_po('Logic Checks', "Have open amount, but without open quantity (Service)", col_pay_amt, idx)
         
             # Open amount without quantity (Material Non-FOC)
             if mat_val != "" and ir_exist_val not in ['FOC', 'F.O.C.']:
                 if still_del > 0 and still_pay_qty > 0 and still_pay_amt < 0: 
-                    log_po('Logic Checks', "Have open amount, but without open quantity (Material)", 'Still to pay amt_ori', idx)
+                    log_po('Logic Checks', "Have open amount, but without open quantity (Material)", col_pay_amt, idx)
         
             # Small value
-            still_pay_amt_eur = safe_float(get_val_fuzzy(row, ['Still to pay amt eur', 'Still to Pay Amt Eur']))
-            if 0 < still_pay_amt_eur <= small_val_limit:
-                log_po('Logic Checks', f"PO open invoice value < {small_val_limit} EUR", 'Still to pay amt_eur', idx)
+            val, col_pay_amt_eur = get_val_fuzzy(row, ['Still to pay amt eur', 'Still to Pay Amt Eur'])
+            amt_eur = safe_float(val)
+            if 0 < amt_eur <= small_val_limit:
+                log_po('Logic Checks', f"PO open invoice value < {small_val_limit} EUR", 'Still to pay amt eur', idx)
         
             # --- INCOTERM ---
-            incot = str(get_val_fuzzy(row, ['IncoT', 'Incoterm'])).strip()
+            val, col_inco = get_val_fuzzy(row, ['IncoT', 'Incoterm'])
+            incot = str(val).strip()
             if not check_mandatory(incot):
-                log_po('Incoterm', "Incoterm is missing", 'IncoT', idx)
+                log_po('Incoterm', "Incoterm is missing", col_inco, idx)
         
             # --- Additional Pricing ---
-            per = safe_float(get_val_fuzzy(row, ['Per']))
+            val, col_per = get_val_fuzzy(row, ['Per', 'Price Unit'])
+            per = safe_float(val)
             if per > 1:
-                log_po('Additional Pricing', "Additional pricing (Per > 1)", 'Per', idx)
+                log_po('Additional Pricing', "Additional pricing (Per > 1)", col_per, idx)
 
         # --- CONSOLIDATE ---
         combined_errs = []
@@ -1074,7 +1105,8 @@ def to_excel_po_download(full_df, bad_cells, category_list):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
         workbook = writer.book
-        red_foramt = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+        red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+        # yellow_format = workbook.add_format({'bg_color': '#FFFFCC', 'border': 1}) # For Direct PO
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
         bold_format = workbook.add_format({'bold': True})
 
@@ -1134,8 +1166,8 @@ def to_excel_po_download(full_df, bad_cells, category_list):
                 excel_row_idx = row_idx + 1
                 try: 
                     val = clean_df.iat[row_idx, excel_col_idx]
-                    if pd.isna(val): ws1.write_blank(excel_row_idx, excel_col_idx, None, red_foramt)
-                    else: ws1.write(excel_row_idx, excel_col_idx, val, red_foramt)
+                    if pd.isna(val): ws1.write_blank(excel_row_idx, excel_col_idx, None, red_format)
+                    else: ws1.write(excel_row_idx, excel_col_idx, val, red_format)
                 except: pass
         ws1.freeze_panes(1, 0)
 
@@ -1190,9 +1222,24 @@ def to_excel_po_download(full_df, bad_cells, category_list):
 def main(): 
     with st.sidebar:
         st.title("🛡️ Workbench")
-        st.write("v8.0 - Hybrid Rule Engine")
+        st.write("v9.0 - Hybrid Rule Engine")
         st.markdown("---")
-        task = st.radio("Select Module", ["SMD Analysis", "Email Validation", "PO Analysis"])
+
+        # --- 1. Module Switches ---
+        with st.expander("Enable/Disable Modules", expanded=True):
+            show_smd = st.toggle("SMD Analysis", value=True)
+            show_email = st.toggle("Email Validation", value=True)
+            show_po = st.toggle("PO Analysis", value=True)
+
+        # --- 2. Dynamic Navigation ---
+        # Build the menu list based on switches
+        available_pages = ["Home"]
+        if show_smd: available_pages.append("SMD Analysis")
+        if show_email: available_pages.append("Email Validation")
+        if show_po: available_pages.append("PO Analysis")
+
+        st.markdown("Navigation")
+        task = st.radio("Go to:", available_pages)
         st.markdown("---")
         
         target_cocd = "3072"
@@ -1205,8 +1252,24 @@ def main():
             target_cocd = st.text_input("Target CoCd:", value="3072" if region_mode == "APAC" else "1040")
             target_porg = st.text_input("Target POrg:", value="3072" if region_mode == "APAC" else "1040", help="Enter multiple POrgs separated by commas.")
 
+    # ================================================
+    # PAGE LOGIC
+    # ================================================
+
+    if task == "Home":
+        st.title("Procurement Workbench")
+        st.markdown("""
+                    Welcome!
+                    Use the sidebar to enable or disable specific analysis modules.
+                    
+                    Available Modules:
+                    - SMD Analysis: Validate Supplier Master Data against global and regional rules.
+                    - Email Validation: Check vendor email lists for missing contacts or format errors. 
+                    - PO Analysis: Analyze Purchase Orders using a dynamic logic matrix.""")
+        st.info("Open the sidebar to get started.")
+
     # --- SMD ANALYSIS ---
-    if task == "SMD Analysis": 
+    elif task == "SMD Analysis": 
         st.title(f"SMD Validation ({region_mode})")
         
         st.subheader("1. Upload Rules Config (Optional)")

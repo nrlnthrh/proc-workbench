@@ -671,9 +671,10 @@ def run_po_analysis_dynamic(df, config_file):
     
     # Helper to safely get float (Fixing NameError source)
     try: 
-        small_val_limit = float(settings.get('Small_Value_Limit', 10.0))
+        if 'Small_Value_Limit' in settings:
+            small_val_limit = float(settings['Small_Value_Limit'])
     except: 
-        small_val_limit = 10.0 # Default fallback
+        pass # Keep default 10.0
 
     banned_reqs = set([x.strip() for x in str(settings.get('Banned_Requestors', '')).split(',') if x.strip()])
 
@@ -1290,5 +1291,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

@@ -1085,7 +1085,7 @@ def main():
     elif task == "SMD Analysis": 
         st.title(f"SMD Validation ({region_mode})")
         
-        st.subheader("1. Upload Rules Config (Optional)")
+        st.subheader("1. Upload Rules Config")
         req_file = st.file_uploader("Upload 'SMD_Rules_Config.xlsx'", type=['xlsx'], key='smd_req')
         
         req_df = None
@@ -1219,3 +1219,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

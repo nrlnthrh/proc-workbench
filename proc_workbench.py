@@ -656,13 +656,14 @@ def run_po_analysis_dynamic(df, config_file):
     settings = rules.get('settings', {})
     matrix = rules.get('matrix', [])
 
+    # Helper: Get Int settings safely
+    def get_int(key, default):
+        try: return int(float(settings.get(key, default)))
+        except: return default
+
     # Settings
     no_dec = set(str(settings.get('No_Decimal_Currencies', 'JPY,KRW,IDR')).split(','))
     special_chars = str(settings.get('Banned_Chars', '<,>,&')).split(',')
-    
-    def get_int(k, d):
-        try: return int(float(settings.get(k, d)))
-        except: return d
     
     max_short = get_int('Max_Short_Text_Length', 40)
     max_req = get_int('Max_Requestor_Length', 12)
@@ -671,10 +672,9 @@ def run_po_analysis_dynamic(df, config_file):
     
     # Helper to safely get float (Fixing NameError source)
     try: 
-        if 'Small_Value_Limit' in settings:
-            small_val_limit = float(settings['Small_Value_Limit'])
+        small_val_limit = float(settings.get('Small_Value_Limit', 10.0))
     except: 
-        pass # Keep default 10.0
+        small_val_limit = 10.0 # Default fallback
 
     banned_reqs = set([x.strip() for x in str(settings.get('Banned_Requestors', '')).split(',') if x.strip()])
 
@@ -708,7 +708,7 @@ def run_po_analysis_dynamic(df, config_file):
         'Vendor Mat': ['Vendor Material Number', 'Vendor Mat'],
         'Curr': ['Curr.', 'Curency', 'Currency'],
         'Crcy': ['Crcy'],
-        'Unit P': ['Unit price'],
+        'Unit Price': ['Unit price'],
         'Schd': ['Schd.', 'Schedule Line'],
         'SLM': ['Supplier SLMID', 'SLM ID'],
         'Unloading': ['Unloading Point - Ext', 'Unloading Point'],
@@ -727,14 +727,15 @@ def run_po_analysis_dynamic(df, config_file):
             if clean in lower_cols: return lower_cols[clean]
         return None
 
-    for k, v in fields_map.items():
-        col_map[k] = find_col(v)
+    for key, candidates in fields_map.items():
+        col_map[key] = find_col(candidates)
+
+    # Identify text columns for comment checks 
+    comment_cols = [c for c in df.columns if 'header comment' in c.lower() or 'item comment' in c.lower()]
 
     # --- 3. PRE-ALLOCATE LISTS (Speed Optimization) ---
     # We will fill these lists row by row. No DataFrame operations inside loop.
-    
     row_count = len(df)
-    
     # Result Columns
     res_remarks = [""] * row_count
     res_status = [""] * row_count
@@ -783,11 +784,15 @@ def run_po_analysis_dynamic(df, config_file):
         po_type = str(get('Type')).strip()
 
         # --- B. CATEGORY & MATRIX ---
-        p_cat = "Material PO" if mat_val != "" else "Service PO"
+        # Logic: If GR = 'X' -> Material PO (Indirect), if GR = Empty -> Service PO (Indirect)
+        if mat_val != "": p_cat = "Material PO"
+        else: p_cat = "Service PO"
+
+        # --- C. MATRIX LOGIC ---
         p_stat = "Review"
         p_rem = "No matching logic found"
-
         rule_found = False
+
         for rule in matrix:
             match = True
             rc = str(rule.get('Category', '')).strip()
@@ -832,13 +837,13 @@ def run_po_analysis_dynamic(df, config_file):
                 break
         
         # --- C. OVERRIDES ---
-        if d_item == 'L': p_stat, p_rem = 'Close', 'Deleted Item.'
-        elif incomplete == 'X': p_stat, p_rem = 'Close', 'Incomplete Item.'
-        elif rel_ind in ['Z', 'P']: p_stat, p_rem = 'Close', 'Blocked Item.'
-        elif dci == 'X' and fin == 'X': p_stat, p_rem = 'Close', 'PO Closed (DCI & FIN).'
-        elif dci == 'X': p_stat, p_rem = 'Close', 'Delivery Complete.'
-        elif fin == 'X': p_stat, p_rem = 'Close', 'Final Invoice.'
-        elif rebate == 'X': p_stat, p_rem = 'Close', 'Rebate Item.'
+        if d_item == 'L': p_stat, p_rem = 'Closed', 'Deleted Item. PO line item closed. No further action is required.'
+        elif incomplete == 'X': p_stat, p_rem = 'Closed', 'Incomplete/on hold item. PO line item closed. No further action is required.'
+        elif rel_ind in ['Z', 'P']: p_stat, p_rem = 'Closed', 'Blocked item. PO line item closed. No further action is required.'
+        elif dci == 'X' and fin == 'X': p_stat, p_rem = 'Closed', 'PO closed due to final invoice ticked and delivery completed ticked, no further action required.'
+        elif dci == 'X': p_stat, p_rem = 'Closed', 'Delivery Completed ticked, no further action required.'
+        elif fin == 'X': p_stat, p_rem = 'Closed', 'Final invoice ticked, no further action required.'
+        elif rebate == 'X': p_stat, p_rem = 'Closed', 'Rebate or Return Item, no further action required.'
 
         # Save to Lists
         res_category[idx] = p_cat
@@ -851,7 +856,7 @@ def run_po_analysis_dynamic(df, config_file):
         # Helper to record error
         def add_err(cat, msg, col_key):
             # Add to the specific category list for this row
-            current = res_cat_errors[cat][idx]
+            current = res_cat_errors.get(cat, [""] * row_count)[idx]
             res_cat_errors[cat][idx] = (current + " | " + msg) if current else msg
             
             # Add to bad cells
@@ -905,9 +910,6 @@ def run_po_analysis_dynamic(df, config_file):
                 if err: add_err('Text', err, key)
             
             # Dynamic Comment columns (Loop raw columns only once here)
-            # This is safer done outside if possible, but inside loop:
-            # We iterate ONLY the columns we identified earlier as comment columns
-            comment_cols = [c for c in df.columns if 'header comment' in c.lower() or 'item comment' in c.lower()]
             for c in comment_cols:
                 val = str(row[c]).strip()
                 if len(val) > 4000:
@@ -920,61 +922,60 @@ def run_po_analysis_dynamic(df, config_file):
 
             # 7. Currency
             curr1 = str(get('Curr')).strip().upper()
-            if curr1 in no_dec and net_price % 1 != 0: add_err('Currency', "Decimal Error", 'Net Price')
+            if curr1 in no_dec and net_price % 1 != 0: add_err('Currency', "Currency with decimal error", 'Net Price')
             
             curr2 = str(get('Crcy')).strip().upper()
-            u_p = safe_float(get('Unit P'))
-            if curr2 in no_dec and u_p % 1 != 0: add_err('Currency', "Decimal Error", 'Unit P')
+            u_p = safe_float(get('Unit Price'))
+            if curr2 in no_dec and u_p % 1 != 0: add_err('Currency', "Currency with decimal error", 'Unit Price')
 
             # 8. Schedule
             schd = safe_float(get('Schd'))
-            if schd > 1: add_err('Schedule Line', "> 1 per item", 'Schd')
+            if schd > 1: add_err('Schedule Line', "Schedule line more than one per item", 'Schd')
 
             # 9. Vendor
-            if 'active_vendors' in rules and vendor not in rules['active_vendors']: add_err('Vendor', "Not Active", 'Vendor')
-            if 'suppress_vendors' in rules and vendor in rules['suppress_vendors']: add_err('Vendor', "Suppressed", 'Vendor')
+            if 'active_vendors' in rules and vendor not in rules['active_vendors']: add_err('Vendor', "Invalid supplier", 'Vendor')
+            if 'suppress_vendors' in rules and vendor in rules['suppress_vendors']: add_err('Vendor', "Suppress PO supplier", 'Vendor')
             slm = str(get('SLM')).strip()
-            if not check_mandatory(vendor) or not check_mandatory(slm): add_err('Vendor', "No SLM ID", 'SLM')
+            if not check_mandatory(vendor) or not check_mandatory(slm): add_err('Vendor', "No supplier SLM ID", 'SLM')
 
             # 10. Unloading
             unload = str(get('Unloading')).strip()
-            if unload == "" or unload.lower() == 'nan': add_err('Unloading Point', "Empty", 'Unloading')
+            if unload == "" or unload.lower() == 'nan': add_err('Unloading Point', "Empty unloading point", 'Unloading')
             elif len(unload) > max_unload: add_err('Unloading Point', "Too Long", 'Unloading')
 
             # 11. Doc Type
-            if po_type in rules.get('req_material', set()) and mat_val == "": add_err('Doc Type', "Need Material", 'Type')
-            if po_type in rules.get('no_material', set()) and mat_val != "": add_err('Doc Type', "No Material Allowed", 'Type')
+            if po_type in rules.get('req_material', set()) and mat_val == "": add_err('Doc Type', "Direct PO DOC Type without material number", 'Type')
+            if po_type in rules.get('no_material', set()) and mat_val != "": add_err('Doc Type', "Indirect PO DOC Type with material number", 'Type')
 
             # 12. Payment
             payt = str(get('PayT')).strip()
             if 'valid_payt' in rules and payt not in rules['valid_payt']: add_err('Payment Term', "Invalid PayT", 'PayT')
 
             # 13. FOC
-            if ir_exist_val in ['FOC', 'F.O.C.'] and still_pay_qty < 1: add_err('FOC', "Service < 1", 'Pay Qty')
+            if ir_exist_val in ['FOC', 'F.O.C.'] and still_pay_qty < 1: add_err('FOC', "FOC Service item < 1", 'Pay Qty')
 
             # 14. Logic
-            if still_pay_amt < 0: add_err('Logic Checks', "Negative Pay Amt", 'Pay Amt')
-            if mat_val == "" and still_pay_qty == 0 and still_pay_amt > 0: add_err('Logic Checks', "Open Amt No Qty (Service)", 'Pay Amt')
+            if still_pay_amt < 0: add_err('Logic Checks', "Negative still to pay amount", 'Pay Amt')
+            if mat_val == "" and still_pay_qty == 0 and still_pay_amt > 0: add_err('Logic Checks', "Have open amount, but without open quantity (Service)", 'Pay Amt')
             if mat_val != "" and ir_exist_val not in ['FOC', 'F.O.C.']:
-                if still_del > 0 and still_pay_qty > 0 and still_pay_amt < 0: add_err('Logic Checks', "Open Amt No Qty (Mat)", 'Pay Amt')
+                if still_del > 0 and still_pay_qty > 0 and still_pay_amt < 0: add_err('Logic Checks', "Have open amount, but without open quantity (Material)", 'Pay Amt')
             
             amt_eur = safe_float(get('Pay Amt Eur'))
-            if 0 < amt_eur <= small_val_limit: add_err('Logic Checks', "Small Value", 'Pay Amt Eur')
+            if 0 < amt_eur <= small_val_limit: add_err('Logic Checks', f"PO open invoice value < {small_val_limit} EUR", 'Pay Amt Eur')
 
             # 15. Incoterm
             incot = str(get('IncoT')).strip()
-            if not check_mandatory(incot): add_err('Incoterm', "Missing", 'IncoT')
+            if not check_mandatory(incot): add_err('Incoterm', "Incoterm is missing", 'IncoT')
 
             # 16. Pricing
             per = safe_float(get('Per'))
-            if per > 1: add_err('Additional Pricing', "Per > 1", 'Per')
+            if per > 1: add_err('Additional Pricing', "Additional pricing (Per > 1)", 'Per')
 
         # Save consolidated errors for this row
         res_error_details[idx] = " | ".join(row_all_errs)
 
     # --- 5. BUILD FINAL DATAFRAME ---
-    # Assign the lists to the dataframe columns all at once (Fastest method)
-    for k in cat_keys:
+    for k in reversed(cat_keys):
         df_out.insert(0, f"{k}_Errors", res_cat_errors[k])
 
     df_out.insert(0, 'Error_Details', res_error_details)
@@ -1291,6 +1292,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 

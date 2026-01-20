@@ -646,347 +646,263 @@ def check_intercompany_vendor(vendor_id):
         return False
     return bool(re.match(r'^A\d{4}', str(vendor_id)))
 
-def run_po_analysis_dynamic(df, config_file): 
-    # Create a COPY to avoid fragmentation warnings, but do it once
-    df_out = df.copy()
-    df.columns = df.columns.str.strip()
-
-    # --- 1. SETUP ---
+def run_po_analysis_dynamic(df, config_file):
+    # --- 1. SETTINGS & RULES ---
     rules = load_po_config(config_file)
     settings = rules.get('settings', {})
     matrix = rules.get('matrix', [])
-
-    # Helper: Get Int settings safely
-    def get_int(key, default):
-        try: return int(float(settings.get(key, default)))
-        except: return default
-
-    # Settings
+    
+    # Parse Settings
     no_dec = set(str(settings.get('No_Decimal_Currencies', 'JPY,KRW,IDR')).split(','))
-    special_chars = str(settings.get('Banned_Chars', '<,>,&')).split(',')
-    
-    max_short = get_int('Max_Short_Text_Length', 40)
-    max_req = get_int('Max_Requestor_Length', 12)
-    max_prep = get_int('Max_Preparer_Length', 12)
-    max_unload = get_int('Max_Unloading_Pt_Length', 25)
-    
-    # Helper to safely get float (Fixing NameError source)
-    try: 
-        small_val_limit = float(settings.get('Small_Value_Limit', 10.0))
-    except: 
-        small_val_limit = 10.0 # Default fallback
-
+    special_chars = str(settings.get('Banned_Chars', '</,/>,&')).split(',')
     banned_reqs = set([x.strip() for x in str(settings.get('Banned_Requestors', '')).split(',') if x.strip()])
+    
+    try: small_val_limit = float(settings.get('Small Value Limit', 10.0))
+    except: small_val_limit = 10.0
 
-    # --- 2. COLUMN MAPPING (Do this ONCE) ---
-    col_map = {}
-    fields_map = {
-        'GR': ['GR', 'G/R', 'Goods Receipt'],
-        'Material': ['Material', 'Material Number', 'Mat. No.'],
-        'Type': ['Type', 'Doc Type'],
-        'Net Price': ['Net Price_Ori', 'Net price_ori', 'Net Price'],
-        'Del Qty': ['Still to Del Quantity', 'Still to del qty', 'Still to Deliver'],
-        'Pay Qty': ['Still to Pay Quantity', 'Still to pay qty', 'Still to Pay'],
-        'Pay Amt': ['Still to Pay Amt_Ori', 'Still to pay amt ori', 'Still to Pay Amount'],
-        'Pay Amt Eur': ['Still to Pay Amt_Eur', 'Still to pay amt eur'],
-        'IR_Exist': ['IR_Exist', 'IR Exist', 'IR Indicator'],
-        'D-Item': ['D-Item', 'Deletion Indicator'],
-        'Incomplete': ['Incomplete'],
-        'Rel': ['Rel', 'Release Indicator'],
-        'DCI': ['DCI', 'Delivery Complete'],
-        'FIN': ['FIN', 'Final Invoice'],
-        'R': ['R', 'Rebate', 'Return Item'],
-        'Matl Group': ['Matl Group', 'Material Group'],
-        'Vendor': ['Vendor', 'Supplier'],
-        'OUn': ['OUn', 'Order Unit'],
-        'PO UOM': ['PO UOM - Ext'],
-        'Order Price Unit': ['Order Price Unit (Purchasing)'],
-        'Requestor': ['Requestor'],
-        'Preparer': ['Preparer'],
-        'SAA': ['SAA', 'Split'],
-        'Short Text': ['Short Text'],
-        'Vendor Mat': ['Vendor Material Number', 'Vendor Mat'],
-        'Curr': ['Curr.', 'Curency', 'Currency'],
-        'Crcy': ['Crcy'],
-        'Unit Price': ['Unit price'],
-        'Schd': ['Schd.', 'Schedule Line'],
-        'SLM': ['Supplier SLMID', 'SLM ID'],
-        'Unloading': ['Unloading Point - Ext', 'Unloading Point'],
-        'PayT': ['PayT', 'Payment Term'],
-        'IncoT': ['IncoT', 'Incoterm'],
-        'Per': ['Per']
-    }
-    
-    lower_cols = {c.lower().replace(' ', '').replace('_', '').replace('.', ''): c for c in df.columns}
-    
-    def find_col(candidates):
-        for c in candidates:
-            if c in df.columns: return c
-        for c in candidates:
-            clean = c.lower().replace(' ', '').replace('_', '').replace('.', '')
-            if clean in lower_cols: return lower_cols[clean]
+    max_short = int(float(settings.get('Max_Short_Text_Length', 40)))
+    max_req = int(float(settings.get('Max_Requestor_Length', 12)))
+    max_prep = int(float(settings.get('Max_Preparer_Length', 12)))
+    max_unload = int(float(settings.get('Max_Unloading_Pt_Length', 25)))
+
+    # --- 2. INTELLIGENT COLUMN MAPPING ---
+    def get_actual_col(potentials):
+        for p in potentials:
+            if p in df.columns: return p
+        clean_map = {c.lower().replace(' ', '').replace('_', '').replace('.', ''): c for c in df.columns}
+        for p in potentials:
+            cp = p.lower().replace(' ', '').replace('_', '').replace('.', '')
+            if cp in clean_map: return clean_map[cp]
         return None
 
-    for key, candidates in fields_map.items():
-        col_map[key] = find_col(candidates)
+    # Map every column required by your specific checks
+    col_map = {
+        'gr': get_actual_col(['GR', 'G/R', 'Goods Receipt']),
+        'material': get_actual_col(['Material', 'Material Number', 'Mat. No.']),
+        'type': get_actual_col(['Type', 'Doc Type']),
+        'net_price': get_actual_col(['Net Price_Ori', 'Net price_ori', 'Net Price']),
+        'still_del': get_actual_col(['Still to Del Quantity', 'Still to Deliver']),
+        'still_pay_qty': get_actual_col(['Still to Pay Quantity', 'Still to Pay']),
+        'still_pay_amt': get_actual_col(['Still to pay amt ori', 'Still to Pay Amount']),
+        'ir_exist': get_actual_col(['IR_Exist', 'IR Indicator']),
+        'd_item': get_actual_col(['D-Item', 'Deletion Indicator']),
+        'incomplete': get_actual_col(['Incomplete']),
+        'rel_ind': get_actual_col(['Rel', 'Release Indicator']),
+        'dci': get_actual_col(['DCI', 'Delivery Complete']),
+        'fin': get_actual_col(['FIN', 'Final Invoice']),
+        'rebate': get_actual_col(['R', 'Rebate', 'Return Item']),
+        'matl_group': get_actual_col(['Matl Group', 'Material Group']),
+        'vendor': get_actual_col(['Vendor', 'Supplier']),
+        'oun': get_actual_col(['OUn', 'Order Unit']),
+        'po_uom_ext': get_actual_col(['PO UOM - Ext']),
+        'u_price_ord': get_actual_col(['Order Price Unit (Purchasing)']),
+        'requestor': get_actual_col(['Requestor']),
+        'preparer': get_actual_col(['Preparer']),
+        'saa': get_actual_col(['SAA', 'Split']),
+        'curr_net': get_actual_col(['Curr.', 'Curency']),
+        'curr_unit': get_actual_col(['Crcy']),
+        'unit_price': get_actual_col(['Unit Price']),
+        'schd': get_actual_col(['Schd.', 'Schedule Line']),
+        'slm': get_actual_col(['Supplier SLMID', 'SLM ID']),
+        'unload': get_actual_col(['Unloading Point - Ext']),
+        'payt': get_actual_col(['PayT', 'Payment Term']),
+        'amt_eur': get_actual_col(['Still to pay amt eur', 'Still to Pay Amt Eur']),
+        'incot': get_actual_col(['IncoT', 'Incoterm']),
+        'per': get_actual_col(['Per']),
+        'short_text': get_actual_col(['Short Text']),
+        'ven_mat': get_actual_col(['Vendor Material Number'])
+    }
 
-    # Identify text columns for comment checks 
-    comment_cols = [c for c in df.columns if 'header comment' in c.lower() or 'item comment' in c.lower()]
-
-    # --- 3. PRE-ALLOCATE LISTS (Speed Optimization) ---
-    # We will fill these lists row by row. No DataFrame operations inside loop.
-    row_count = len(df)
-    # Result Columns
-    res_remarks = [""] * row_count
-    res_status = [""] * row_count
-    res_category = [""] * row_count
-    res_error_details = [""] * row_count
+    # --- 3. DATA PREPARATION ---
+    records = df.to_dict('records')
+    category_list = ['PCN', 'Unit of Measurement', 'Requestor', 'Preparer', 'Split Accounting', 
+                     'Text', 'Currency', 'Schedule Line', 'Vendor', 'Unloading Point', 
+                     'Doc Type', 'Payment Term', 'FOC', 'Logic Checks', 'Additional Pricing', 'Incoterm']
     
-    # Error Category Columns (Dictionary of Lists)
-    cat_keys = ['Vendor', 'PCN', 'Unit of Measurement', 'Requestor', 'Preparer', 'Split Accounting', 'Text', 'Currency', 'Schedule Line', 'Unloading Point', 'Doc Type', 'Payment Term', 'FOC', 'Logic Checks', 'Additional Pricing', 'Incoterm']
-    res_cat_errors = {k: [""] * row_count for k in cat_keys}
-    
-    bad_cells = [] # List of tuples (row_idx, col_name)
+    cat_remarks_collector = {cat: [] for cat in category_list}
+    po_categories, po_statuses, po_remarks, error_details = [], [], [], []
+    bad_cells = []
 
-    # Helper for Safe Float
-    def safe_float(val):
-        if pd.isna(val) or str(val).strip() in ['-', '', 'nan']: return 0.0
+    def safe_f(val):
+        if val is None or val == '' or val != val: return 0.0
         try: return float(str(val).replace(',', ''))
         except: return 0.0
 
-    # --- 4. MAIN LOOP (Pure Python Logic) ---
-    # Convert DF to list of dicts for fastest access (avoids index lookups)
-    records = df.to_dict('records')
-
+    # --- 4. THE OPTIMIZED LOOP ---
     for idx, row in enumerate(records):
+        row_cat_errors = {cat: [] for cat in category_list}
         
-        # --- A. FAST DATA EXTRACTION ---
-        def get(key):
-            col = col_map.get(key)
-            return row[col] if col and pd.notna(row[col]) else ""
+        def get_v(key):
+            actual = col_map.get(key)
+            return row.get(actual) if actual else ""
 
-        gr_val = str(get('GR')).strip().upper()
-        mat_raw = str(get('Material')).strip()
+        def log_e(cat, msg, key):
+            row_cat_errors[cat].append(msg)
+            actual = col_map.get(key)
+            if actual: bad_cells.append((idx, actual))
+
+        # Core logic variables
+        gr_val = str(get_v('gr')).strip().upper()
+        mat_raw = str(get_v('material')).strip()
         mat_val = "" if mat_raw in ['0', '00000000', 'nan', ''] else mat_raw
+        net_price = safe_f(get_v('net_price'))
+        still_del = safe_f(get_v('still_del'))
+        still_pay_qty = safe_f(get_v('still_pay_qty'))
+        still_pay_amt = safe_f(get_v('still_pay_amt'))
+        ir_exist_raw = str(get_v('ir_exist')).strip().upper()
+        ir_clean = ir_exist_raw.replace('.', '').replace(' ', '')
+
+        # PO Category Determination
+        p_cat = "Direct PO" if mat_val != "" else ("Material PO" if gr_val == 'X' else "Service PO")
         
-        net_price = safe_float(get('Net Price'))
-        still_del = safe_float(get('Del Qty'))
-        still_pay_qty = safe_float(get('Pay Qty'))
-        still_pay_amt = safe_float(get('Pay Amt'))
-        
-        ir_exist_val = str(get('IR_Exist')).strip().upper()
-        d_item = str(get('D-Item')).strip().upper()
-        incomplete = str(get('Incomplete')).strip().upper()
-        rel_ind = str(get('Rel')).strip().upper()
-        dci = str(get('DCI')).strip().upper()
-        fin = str(get('FIN')).strip().upper()
-        rebate = str(get('R')).strip().upper()
-        po_type = str(get('Type')).strip()
-
-        # --- B. CATEGORY & MATRIX ---
-        # Logic: If GR = 'X' -> Material PO (Indirect), if GR = Empty -> Service PO (Indirect)
-        if mat_val != "": p_cat = "Material PO"
-        else: p_cat = "Service PO"
-
-        # --- C. MATRIX LOGIC ---
-        p_stat = "Review"
-        p_rem = "No matching logic found"
-        rule_found = False
-
+        # Matrix Logic (Simplified evaluation)
+        p_stat, p_rem, rule_found = "Review", "No matching logic found", False
         for rule in matrix:
             match = True
-            rc = str(rule.get('Category', '')).strip()
-            if rc and rc != p_cat: match = False
-            
+            if str(rule.get('Category', '')).strip() and str(rule.get('Category', '')).strip() != p_cat: match = False
             if match:
-                rg = str(rule.get('GR_Flag', '')).strip().upper()
-                if rg == 'X' and gr_val != 'X': match = False
-                elif rg == 'EMPTY' and gr_val != '': match = False
-            
+                r_gr = str(rule.get('GR', '')).strip().upper()
+                if r_gr == 'X' and gr_val != 'X': match = False
+                elif r_gr == 'EMPTY' and gr_val != '': match = False
             if match:
-                rm = str(rule.get('Material_Flag', '')).strip().upper()
-                if rm == 'FILLED' and mat_val == '': match = False
-                elif rm == 'EMPTY' and mat_val != '': match = False
-            
+                r_mat = str(rule.get('Material', '')).strip().upper()
+                if r_mat == 'FILLED' and mat_val == '': match = False
+                elif r_mat == 'EMPTY' and mat_val != '': match = False
+            # Condition parsing
             if match:
-                r_cond = str(rule.get('Conditions', '')).strip().upper().replace(' ', '')
+                r_cond = str(rule.get('Conditions', '')).upper().replace(' ', '')
                 if r_cond:
-                    conds = r_cond.split(',')
-                    for c in conds:
-                        if 'PRICE=0' in c and net_price != 0: match = False
-                        elif 'PRICE>0' in c and net_price <= 0: match = False
-                        elif 'DEL=0' in c and still_del != 0: match = False
-                        elif 'DEL>0' in c and still_del <= 0: match = False
-                        elif 'PAYQTY=0' in c and still_pay_qty != 0: match = False
-                        elif 'PAYQTY>0' in c and still_pay_qty <= 0: match = False
-                        elif 'PAYQTY<0' in c and still_pay_qty >= 0: match = False
-                        elif 'PAYAMT=0' in c and still_pay_amt != 0: match = False
-                        elif 'PAYAMT>0' in c and still_pay_amt <= 0: match = False
-                        elif 'PAYAMT<0' in c and still_pay_amt >= 0: match = False
-                        elif 'IR_EXIST=' in c:
-                            target = c.split('=')[1]
-                            check_val = ir_exist_val.replace('.', '').replace(' ', '')
-                            target_clean = target.replace('.', '').replace(' ', '')
-                            if check_val != target_clean: match = False
-            
+                    if 'PRICE=0' in r_cond and net_price != 0: match = False
+                    if 'PRICE>0' in r_cond and net_price <= 0: match = False
+                    if 'DEL=0' in r_cond and still_del != 0: match = False
+                    if 'DEL>0' in r_cond and still_del <= 0: match = False
+                    if 'PAYQTY=0' in r_cond and still_pay_qty != 0: match = False
+                    if 'PAYQTY>0' in r_cond and still_pay_qty <= 0: match = False
+                    if 'PAYAMT=0' in r_cond and still_pay_amt != 0: match = False
+                    if 'IR_EXIST=' in r_cond:
+                        target = r_cond.split('IR_EXIST=')[1].split(',')[0].replace('.', '').replace(' ', '')
+                        if ir_clean != target: match = False
             if match:
-                p_cat = rule.get('Category', p_cat)
-                p_stat = rule.get('Status', '')
-                p_rem = rule.get('Remark', '')
-                rule_found = True
+                p_stat, p_rem, rule_found = rule.get('Status'), rule.get('Remark'), True
                 break
-        
-        # --- C. OVERRIDES ---
-        if d_item == 'L': p_stat, p_rem = 'Closed', 'Deleted Item. PO line item closed. No further action is required.'
-        elif incomplete == 'X': p_stat, p_rem = 'Closed', 'Incomplete/on hold item. PO line item closed. No further action is required.'
-        elif rel_ind in ['Z', 'P']: p_stat, p_rem = 'Closed', 'Blocked item. PO line item closed. No further action is required.'
-        elif dci == 'X' and fin == 'X': p_stat, p_rem = 'Closed', 'PO closed due to final invoice ticked and delivery completed ticked, no further action required.'
-        elif dci == 'X': p_stat, p_rem = 'Closed', 'Delivery Completed ticked, no further action required.'
-        elif fin == 'X': p_stat, p_rem = 'Closed', 'Final invoice ticked, no further action required.'
-        elif rebate == 'X': p_stat, p_rem = 'Closed', 'Rebate or Return Item, no further action required.'
 
-        # Save to Lists
-        res_category[idx] = p_cat
-        res_status[idx] = p_stat
-        res_remarks[idx] = p_rem
+        # Hardcoded Filter Rule Overrides
+        if str(get_v('d_item')) == 'L': p_stat, p_rem = 'Closed', 'Deleted Item. PO line item closed.'
+        elif str(get_v('incomplete')) == 'X': p_stat, p_rem = 'Closed', 'Incomplete/on hold item.'
+        elif str(get_v('rel_ind')) in ['Z', 'P']: p_stat, p_rem = 'Closed', 'Blocked item.'
+        elif get_v('dci') == 'X' or get_v('fin') == 'X': p_stat, p_rem = 'Closed', 'PO closed due to DCI/FIN ticked.'
+        elif get_v('rebate') == 'X': p_stat, p_rem = 'Closed', 'Rebate or Return Item.'
 
-        # --- D. ERROR CHECKS ---
-        row_all_errs = []
-        
-        # Helper to record error
-        def add_err(cat, msg, col_key):
-            # Add to the specific category list for this row
-            current = res_cat_errors.get(cat, [""] * row_count)[idx]
-            res_cat_errors[cat][idx] = (current + " | " + msg) if current else msg
-            
-            # Add to bad cells
-            real_col = col_map.get(col_key)
-            if real_col: bad_cells.append((idx, real_col))
-            
-            # Add to consolidated list
-            row_all_errs.append(msg)
-
+        # --- RESTORED SPECIFIC CATEGORY CHECKS ---
         if p_stat in ['Open', 'Check with Local']:
-
             # 1. PCN
-            matl_group = str(get('Matl Group')).strip()
-            vendor = str(get('Vendor')).strip()
-            if check_intercompany_vendor(vendor):
-                if matl_group != 'I9999': add_err('PCN', "Intercompany PO not I9999", 'Matl Group')
-            if 'valid_pcn' in rules and matl_group not in rules['valid_pcn']:
-                add_err('PCN', "PCN not in List", 'Matl Group')
-            if 'valid_unspsc' in rules and matl_group not in rules['valid_unspsc']:
-                add_err('PCN', "PCN not in UNSPSC", 'Matl Group')
+            m_group = str(get_v('matl_group')).strip()
+            vnd = str(get_v('vendor')).strip()
+            if check_intercompany_vendor(vnd) and m_group != 'I9999': log_e('PCN', "Intercompany PO not using PCN I9999", 'matl_group')
+            if 'valid_pcn' in rules and m_group not in rules['valid_pcn']: log_e('PCN', "PCN not in PCN tool", 'matl_group')
+            if 'valid_unspsc' in rules and m_group not in rules['valid_unspsc']: log_e('PCN', "PCN not in UNSPSC List", 'matl_group')
 
             # 2. UOM
-            uom = str(get('OUn')).strip()
-            po_uom = str(get('PO UOM')).strip()
-            u_price = str(get('Order Price Unit')).strip()
-            if uom != po_uom: add_err('Unit of Measurement', "UOM != PO UOM", 'OUn')
-            if po_uom != u_price: add_err('Unit of Measurement', "PO UOM != Order Price Unit", 'PO UOM')
-            if 'valid_uom' in rules and po_uom not in rules['valid_uom']: add_err('Unit of Measurement', "UOM Invalid", 'PO UOM')
+            oun = str(get_v('oun')).strip()
+            uom_ext = str(get_v('po_uom_ext')).strip()
+            u_ord = str(get_v('u_price_ord')).strip()
+            if oun != uom_ext: log_e('Unit of Measurement', "OUn != PO UOM - Ext", 'oun')
+            if uom_ext != u_ord: log_e('Unit of Measurement', "PO UOM - Ext != Order Price Unit", 'po_uom_ext')
+            if 'valid_uom' in rules and uom_ext not in rules['valid_uom']: log_e('Unit of Measurement', "UOM not in MyBuy", 'po_uom_ext')
 
             # 3. Requestor
-            req = str(get('Requestor')).strip()
-            if req in banned_reqs: add_err('Requestor', "Requestor Banned", 'Requestor')
-            if len(req) > max_req: add_err('Requestor', f"ID > {max_req} chars", 'Requestor')
+            req = str(get_v('requestor')).strip()
+            if req in banned_reqs: log_e('Requestor', "Requestor is PROC SSC colleague", 'requestor')
+            if len(req) > max_req: log_e('Requestor', f"User ID exceeding {max_req} chars", 'requestor')
 
             # 4. Preparer
-            prep = str(get('Preparer')).strip()
-            if len(prep) > max_prep: add_err('Preparer', f"ID > {max_prep} chars", 'Preparer')
+            prep = str(get_v('preparer')).strip()
+            if len(prep) > max_prep: log_e('Preparer', f"User ID exceeding {max_prep} chars", 'preparer')
 
-            # 5. SAA
-            saa = safe_float(get('SAA'))
-            if saa > 1: add_err('Split Accounting', "SAA > 1", 'SAA')
+            # 5. Split Accounting
+            saa = safe_f(get_v('saa'))
+            if saa > 1:
+                msg = "Material SAA > 1" if mat_val != "" else "Service SAA > 1"
+                log_e('Split Accounting', msg, 'saa')
 
             # 6. Text
-            # Specific columns
-            for key in ['Short Text', 'Vendor Mat']:
-                val = str(get(key)).strip()
-                col_n = col_map.get(key)
-                if not col_n: continue
-                if key == 'Short Text' and len(val) > max_short: add_err('Text', "Too Long", key)
-                err = check_special_characters(val, special_chars)
-                if err: add_err('Text', err, key)
+            for c_name in df.columns:
+                if 'comment' in c_name.lower():
+                    txt = str(row[c_name])
+                    if len(txt) > 4000: log_e('Text', f"{c_name} > 4000 chars", c_name)
+                    err_c = check_special_characters(txt, special_chars)
+                    if err_c: log_e('Text', f"{c_name}: {err_c}", c_name)
             
-            # Dynamic Comment columns (Loop raw columns only once here)
-            for c in comment_cols:
-                val = str(row[c]).strip()
-                if len(val) > 4000:
-                    add_err('Text', f"{c} > 4000", c) # Pass raw column name
-                    bad_cells.append((idx, c)) # Manually add because it's not in map keys
-                err = check_special_characters(val, special_chars)
-                if err: 
-                    add_err('Text', f"{c}: {err}", c) # This writes to Text category
-                    bad_cells.append((idx, c))
+            short = str(get_v('short_text'))
+            if len(short) > max_short: log_e('Text', f"Exceeds {max_short} chars", 'short_text')
+            err_short = check_special_characters(short, special_chars)
+            if err_short: log_e('Text', f"Short Text: {err_short}", 'short_text')
 
             # 7. Currency
-            curr1 = str(get('Curr')).strip().upper()
-            if curr1 in no_dec and net_price % 1 != 0: add_err('Currency', "Currency with decimal error", 'Net Price')
+            curr1 = str(get_v('curr_net')).strip().upper()
+            if curr1 in no_dec and net_price % 1 != 0: log_e('Currency', "Currency with decimal error", 'net_price')
             
-            curr2 = str(get('Crcy')).strip().upper()
-            u_p = safe_float(get('Unit Price'))
-            if curr2 in no_dec and u_p % 1 != 0: add_err('Currency', "Currency with decimal error", 'Unit Price')
+            curr2 = str(get_v('curr_unit')).strip().upper()
+            u_price = safe_f(get_v('unit_price'))
+            if curr2 in no_dec and u_price % 1 != 0: log_e('Currency', "Currency with decimal error", 'unit_price')
 
-            # 8. Schedule
-            schd = safe_float(get('Schd'))
-            if schd > 1: add_err('Schedule Line', "Schedule line more than one per item", 'Schd')
+            # 8. Schedule Line
+            if safe_f(get_v('schd')) > 1: log_e('Schedule Line', "Schedule line more than one per item", 'schd')
 
             # 9. Vendor
-            if 'active_vendors' in rules and vendor not in rules['active_vendors']: add_err('Vendor', "Invalid supplier", 'Vendor')
-            if 'suppress_vendors' in rules and vendor in rules['suppress_vendors']: add_err('Vendor', "Suppress PO supplier", 'Vendor')
-            slm = str(get('SLM')).strip()
-            if not check_mandatory(vendor) or not check_mandatory(slm): add_err('Vendor', "No supplier SLM ID", 'SLM')
+            if 'active_vendors' in rules and vnd not in rules['active_vendors']: log_e('Vendor', "Invalid supplier", 'vendor')
+            if check_intercompany_vendor(vnd): log_e('Vendor', "Intercompany PO", 'vendor')
+            slm = str(get_v('slm')).strip()
+            if not check_mandatory(vnd) or not check_mandatory(slm): log_e('Vendor', "No supplier SLM ID", 'slm')
+            if 'suppress_vendors' in rules and vnd in rules['suppress_vendors']: log_e('Vendor', "Suppress PO supplier", 'vendor')
 
-            # 10. Unloading
-            unload = str(get('Unloading')).strip()
-            if unload == "" or unload.lower() == 'nan': add_err('Unloading Point', "Empty unloading point", 'Unloading')
-            elif len(unload) > max_unload: add_err('Unloading Point', "Too Long", 'Unloading')
+            # 10. Unloading Point
+            unload = str(get_v('unload')).strip()
+            if not unload or unload.lower() == 'nan': log_e('Unloading Point', "Empty unloading point", 'unload')
+            elif len(unload) > max_unload: log_e('Unloading Point', f"Exceeds {max_unload} chars", 'unload')
 
             # 11. Doc Type
-            if po_type in rules.get('req_material', set()) and mat_val == "": add_err('Doc Type', "Direct PO DOC Type without material number", 'Type')
-            if po_type in rules.get('no_material', set()) and mat_val != "": add_err('Doc Type', "Indirect PO DOC Type with material number", 'Type')
+            if po_type := str(get_v('type')).strip():
+                if po_type in rules.get('req_material', set()) and mat_val == "": log_e('Doc Type', "Direct PO DOC Type without material", 'type')
+                if po_type in rules.get('no_material', set()) and mat_val != "": log_e('Doc Type', "Indirect PO DOC Type with material", 'type')
 
-            # 12. Payment
-            payt = str(get('PayT')).strip()
-            if 'valid_payt' in rules and payt not in rules['valid_payt']: add_err('Payment Term', "Invalid PayT", 'PayT')
+            # 12. Payment Term
+            payt = str(get_v('payt')).strip()
+            if 'valid_payt' in rules and payt not in rules['valid_payt']: log_e('Payment Term', "Payment term not in MyBuy", 'payt')
 
             # 13. FOC
-            if ir_exist_val in ['FOC', 'F.O.C.'] and still_pay_qty < 1: add_err('FOC', "FOC Service item < 1", 'Pay Qty')
+            if ir_clean == 'FOC' and still_pay_qty < 1: log_e('FOC', "FOC Service item < 1", 'still_pay_qty')
 
-            # 14. Logic
-            if still_pay_amt < 0: add_err('Logic Checks', "Negative still to pay amount", 'Pay Amt')
-            if mat_val == "" and still_pay_qty == 0 and still_pay_amt > 0: add_err('Logic Checks', "Have open amount, but without open quantity (Service)", 'Pay Amt')
-            if mat_val != "" and ir_exist_val not in ['FOC', 'F.O.C.']:
-                if still_del > 0 and still_pay_qty > 0 and still_pay_amt < 0: add_err('Logic Checks', "Have open amount, but without open quantity (Material)", 'Pay Amt')
-            
-            amt_eur = safe_float(get('Pay Amt Eur'))
-            if 0 < amt_eur <= small_val_limit: add_err('Logic Checks', f"PO open invoice value < {small_val_limit} EUR", 'Pay Amt Eur')
+            # 14. Logic Checks
+            if still_pay_amt < 0: log_e('Logic Checks', "Negative still to pay amount", 'still_pay_amt')
+            if mat_val == "" and still_pay_qty == 0 and still_pay_amt > 0: log_e('Logic Checks', "Open amount but no quantity (Service)", 'still_pay_amt')
+            amt_eur = safe_f(get_v('amt_eur'))
+            if 0 < amt_eur <= small_val_limit: log_e('Logic Checks', f"PO value < {small_val_limit} EUR", 'amt_eur')
 
-            # 15. Incoterm
-            incot = str(get('IncoT')).strip()
-            if not check_mandatory(incot): add_err('Incoterm', "Incoterm is missing", 'IncoT')
+            # 15. Additional Pricing
+            if safe_f(get_v('per')) > 1: log_e('Additional Pricing', "Additional pricing (Per > 1)", 'per')
 
-            # 16. Pricing
-            per = safe_float(get('Per'))
-            if per > 1: add_err('Additional Pricing', "Additional pricing (Per > 1)", 'Per')
+            # 16. Incoterm
+            if not check_mandatory(str(get_v('incot'))): log_e('Incoterm', "Incoterm is missing", 'incot')
 
-        # Save consolidated errors for this row
-        res_error_details[idx] = " | ".join(row_all_errs)
+        # --- 5. CONSOLIDATE ---
+        po_categories.append(p_cat); po_statuses.append(p_stat); po_remarks.append(p_rem)
+        row_joined_errs = []
+        for cat in category_list:
+            msg = " | ".join(row_cat_errors[cat])
+            cat_remarks_collector[cat].append(msg)
+            if msg: row_joined_errs.append(msg)
+        error_details.append(" | ".join(row_joined_errs))
 
-    # --- 5. BUILD FINAL DATAFRAME ---
-    for k in reversed(cat_keys):
-        df_out.insert(0, f"{k}_Errors", res_cat_errors[k])
-
-    df_out.insert(0, 'Error_Details', res_error_details)
-    df_out.insert(0, 'Remarks', res_remarks)
-    df_out.insert(0, 'PO Status', res_status)
-    df_out.insert(0, 'PO Category', res_category)
-
-    # Clean duplicates in bad_cells
-    bad_cells = list(set(bad_cells))
-
-    return df_out, bad_cells, cat_keys
+    # --- 6. FINAL BUILD ---
+    df_out = df.copy()
+    df_out.insert(0, 'PO Category', po_categories)
+    df_out.insert(1, 'PO Status', po_statuses)
+    df_out.insert(2, 'Remarks', po_remarks)
+    df_out.insert(3, 'Error_Details', error_details)
+    for cat in category_list: df_out[f"{cat}_Remarks"] = cat_remarks_collector[cat]
+    
+    return df_out, bad_cells, category_list
 
 def to_excel_po_download(full_df, bad_cells, category_list):
     output = io.BytesIO()

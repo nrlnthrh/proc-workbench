@@ -657,9 +657,7 @@ def run_po_analysis_dynamic(df, config_file):
     special_chars = str(settings.get('Banned_Chars', '</,/>,&')).split(',')
     banned_reqs = set([x.strip() for x in str(settings.get('Banned_Requestors', '')).split(',') if x.strip()])
     
-    try: small_val_limit = float(settings.get('Small Value Limit', 10.0))
-    except: small_val_limit = 10.0
-
+    small_val_limit = float(settings.get('Small Value Limit', 10.0))
     max_short = int(float(settings.get('Max_Short_Text_Length', 40)))
     max_req = int(float(settings.get('Max_Requestor_Length', 12)))
     max_prep = int(float(settings.get('Max_Preparer_Length', 12)))
@@ -714,13 +712,22 @@ def run_po_analysis_dynamic(df, config_file):
     }
 
     # --- 3. DATA PREPARATION ---
-    records = df.to_dict('records')
+    # Identify "comment" columns 
+    comment_cols = [c for c in df.columns if 'comment' in c.lower()]
+    # Identify all needed columns
+    needed_cols = [v for v in col_map.values() if v] + comment_cols
+    # Create a small view for processing
+    df_small = df[list(set(needed_cols))]
+
     category_list = ['PCN', 'Unit of Measurement', 'Requestor', 'Preparer', 'Split Accounting', 
                      'Text', 'Currency', 'Schedule Line', 'Vendor', 'Unloading Point', 
                      'Doc Type', 'Payment Term', 'FOC', 'Logic Checks', 'Additional Pricing', 'Incoterm']
     
-    cat_remarks_collector = {cat: [] for cat in category_list}
-    po_categories, po_statuses, po_remarks, error_details = [], [], [], []
+    results = {
+        'PO Category': [], 'PO Status': [], 'Remarks': [], 'Error_Details': []
+    }
+    for cat in category_list: results[f"{cat}_Remarks"] = []
+    
     bad_cells = []
 
     def safe_f(val):
@@ -729,7 +736,7 @@ def run_po_analysis_dynamic(df, config_file):
         except: return 0.0
 
     # --- 4. THE OPTIMIZED LOOP ---
-    for idx, row in enumerate(records):
+    for idx, row in df_small.iterrows():
         row_cat_errors = {cat: [] for cat in category_list}
         
         def get_v(key):
@@ -756,7 +763,7 @@ def run_po_analysis_dynamic(df, config_file):
         p_cat = "Direct PO" if mat_val != "" else ("Material PO" if gr_val == 'X' else "Service PO")
         
         # Matrix Logic (Simplified evaluation)
-        p_stat, p_rem, rule_found = "Review", "No matching logic found", False
+        p_stat, p_rem = "Review", "No matching logic found"
         for rule in matrix:
             match = True
             if str(rule.get('Category', '')).strip() and str(rule.get('Category', '')).strip() != p_cat: match = False
@@ -786,7 +793,7 @@ def run_po_analysis_dynamic(df, config_file):
                         target = r_cond.split('IR_EXIST=')[1].split(',')[0].replace('.', '').replace(' ', '')
                         if ir_clean != target: match = False
             if match:
-                p_stat, p_rem, rule_found = rule.get('Status'), rule.get('Remark'), True
+                p_stat, p_rem = rule.get('Status'), rule.get('Remark')
                 break
 
         # Hardcoded Filter Rule Overrides
@@ -897,21 +904,21 @@ def run_po_analysis_dynamic(df, config_file):
             if not check_mandatory(str(get_v('incot'))): log_e('Incoterm', "Incoterm is missing", 'incot')
 
         # --- 5. CONSOLIDATE ---
-        po_categories.append(p_cat); po_statuses.append(p_stat); po_remarks.append(p_rem)
+        results['PO Category'].append(p_cat)
+        results['PO Status'].append(p_stat)
+        results['Remarks'].append(p_rem)
+
         row_joined_errs = []
         for cat in category_list:
             msg = " | ".join(row_cat_errors[cat])
-            cat_remarks_collector[cat].append(msg)
+            results[f"{cat}_Remarks"].append(msg)
             if msg: row_joined_errs.append(msg)
-        error_details.append(" | ".join(row_joined_errs))
+        results['Error_Details'].append(" | ".join(row_joined_errs))
 
     # --- 6. FINAL BUILD ---
-    df_out = df.copy()
-    df_out.insert(0, 'PO Category', po_categories)
-    df_out.insert(1, 'PO Status', po_statuses)
-    df_out.insert(2, 'Remarks', po_remarks)
-    df_out.insert(3, 'Error_Details', error_details)
-    for cat in category_list: df_out[f"{cat}_Remarks"] = cat_remarks_collector[cat]
+    df_results = pd.DataFrame(results)
+    # Concate results to original DF 
+    df_out = pd.concat([df_results, df], axis=1)
     
     return df_out, bad_cells, category_list
 
@@ -1085,7 +1092,7 @@ def main():
     elif task == "SMD Analysis": 
         st.title(f"SMD Validation ({region_mode})")
         
-        st.subheader("1. Upload Rules Config")
+        st.subheader("1. Upload Rules Config (Optional)")
         req_file = st.file_uploader("Upload 'SMD_Rules_Config.xlsx'", type=['xlsx'], key='smd_req')
         
         req_df = None
@@ -1219,4 +1226,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

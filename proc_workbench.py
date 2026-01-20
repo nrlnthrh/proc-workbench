@@ -778,7 +778,10 @@ def run_po_analysis_dynamic(df, config_file):
                     if 'DEL>0' in r_cond and still_del <= 0: match = False
                     if 'PAYQTY=0' in r_cond and still_pay_qty != 0: match = False
                     if 'PAYQTY>0' in r_cond and still_pay_qty <= 0: match = False
-                    if 'PAYAMT=0' in r_cond and still_pay_amt != 0: match = False
+                    if 'PAYQTY<0' in r_cond and still_pay_qty >= 0: match = False
+                    if 'PAYAMT=0' in r_cond and still_pay_qty != 0: match = False
+                    if 'PAYAMT>0' in r_cond and still_pay_amt <= 0: match = False
+                    if 'PAYAMT<0' in r_cond and still_pay_amt >= 0: match = False
                     if 'IR_EXIST=' in r_cond:
                         target = r_cond.split('IR_EXIST=')[1].split(',')[0].replace('.', '').replace(' ', '')
                         if ir_clean != target: match = False
@@ -787,11 +790,13 @@ def run_po_analysis_dynamic(df, config_file):
                 break
 
         # Hardcoded Filter Rule Overrides
-        if str(get_v('d_item')) == 'L': p_stat, p_rem = 'Closed', 'Deleted Item. PO line item closed.'
-        elif str(get_v('incomplete')) == 'X': p_stat, p_rem = 'Closed', 'Incomplete/on hold item.'
-        elif str(get_v('rel_ind')) in ['Z', 'P']: p_stat, p_rem = 'Closed', 'Blocked item.'
-        elif get_v('dci') == 'X' or get_v('fin') == 'X': p_stat, p_rem = 'Closed', 'PO closed due to DCI/FIN ticked.'
-        elif get_v('rebate') == 'X': p_stat, p_rem = 'Closed', 'Rebate or Return Item.'
+        if str(get_v('d_item')) == 'L': p_stat, p_rem = 'Closed', 'Deleted Item. PO line item closed. No further action is required.'
+        elif str(get_v('incomplete')) == 'X': p_stat, p_rem = 'Closed', 'Incomplete/on hold item. PO line item closed. No further action is required.'
+        elif str(get_v('rel_ind')) in ['Z', 'P']: p_stat, p_rem = 'Closed', 'Blocked item. PO line item closed. No further action is required.'
+        elif get_v('dci') == 'X' and get_v('fin') == 'X': p_stat, p_rem = 'Closed', 'PO closed due to final invoice ticked and delivery completed ticked, no further action required.'
+        elif get_v('dci') == 'X' : p_stat, p_rem = 'Closed', 'Delivery Completed ticked, no further action required.'
+        elif get_v('fin') == 'X': p_stat, p_rem = 'Closed', 'Final invoice ticked, no further action required.'
+        elif get_v('rebate') == 'X': p_stat, p_rem = 'Closed', 'Rebate or Return Item, no further action required.'
 
         # --- RESTORED SPECIFIC CATEGORY CHECKS ---
         if p_stat in ['Open', 'Check with Local']:
@@ -838,6 +843,10 @@ def run_po_analysis_dynamic(df, config_file):
             err_short = check_special_characters(short, special_chars)
             if err_short: log_e('Text', f"Short Text: {err_short}", 'short_text')
 
+            ven_mat = str(get_v('ven_mat'))
+            err_ven = check_special_characters(ven_mat, special_chars)
+            if err_ven: log_e('Text', f"Vendor Material Number: {err_ven}", 'ven_mat')
+
             # 7. Currency
             curr1 = str(get_v('curr_net')).strip().upper()
             if curr1 in no_dec and net_price % 1 != 0: log_e('Currency', "Currency with decimal error", 'net_price')
@@ -875,7 +884,9 @@ def run_po_analysis_dynamic(df, config_file):
 
             # 14. Logic Checks
             if still_pay_amt < 0: log_e('Logic Checks', "Negative still to pay amount", 'still_pay_amt')
-            if mat_val == "" and still_pay_qty == 0 and still_pay_amt > 0: log_e('Logic Checks', "Open amount but no quantity (Service)", 'still_pay_amt')
+            if mat_val == "" and still_pay_qty == 0 and still_pay_amt > 0: log_e('Logic Checks', "Have open amount, but without open quantity (Service)", 'still_pay_amt')
+            if mat_val == "" and ir_exist_raw not in ['FOC', 'F.O.C.']: 
+                if still_del > 0 and still_pay_qty > 0 and still_pay_amt < 0: log_e('Logic Checks', "Have open amount, but without open quantity (Material)", 'still_pay_amt')
             amt_eur = safe_f(get_v('amt_eur'))
             if 0 < amt_eur <= small_val_limit: log_e('Logic Checks', f"PO value < {small_val_limit} EUR", 'amt_eur')
 
@@ -1208,4 +1219,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

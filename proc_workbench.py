@@ -46,52 +46,19 @@ def check_greater_than_zero(value):
         pass
     return False
 
-def check_incoterm_rules(row):
-    errors = []
-    incot = str(row.get('IncoT', '')).strip().upper()
-    inco2 = str(row.get('Inco. 2', '')).strip()
-
-    if not incot or incot == 'NAN': return errors
-    
-    valid_versions = ["Inc2020", "Inc2010", "Inc2000"]
-    if not any(v.upper() in inco2.upper() for v in valid_versions):
-        errors.append(f"Location (Inco. 2) must specify version (e.g. Inc2020). Found: '{inco2}'")
-    
-    if incot == 'DAT': errors.append("Incoterm 'DAT' is obsolete. Change to 'DPU'.")
-
-    ship_to_group = ['DAF', 'DDU', 'DEQ', 'DES', 'DAP', 'DDP', 'DPU']
-    exw_group = ['EXW']
-    fca_allowed = ["supplier warehouse", "specified warehouse", "securiforce wareh"]
-
-    inco2_lower = inco2.lower()
-    if incot in ship_to_group:
-        if not inco2_lower.startswith("ship-to address"):
-            errors.append(f"For {incot}, Location must start with 'Ship-to address...'")
-    elif incot in exw_group:
-        if not inco2_lower.startswith("supplier warehouse"):
-            errors.append(f"For {incot}, Location must start with 'Supplier warehouse...'")
-    elif incot == 'FCA':
-        if not any(inco2_lower.startswith(x) for x in fca_allowed):
-            errors.append(f"For FCA, Location invalid prefix")
-
-    return errors
-
-def check_postal_code(country, postal_code):
+def check_postal_code(country, postal_code, rules_dict=None):
     if not check_mandatory(postal_code): return None
     postal_str = str(postal_code).strip()
-    rules = {
-        'GB': (5, 9), 
-        'JP': (7, 8), 
-        'PT': (7, 8), 
-        'CA': (6, 7), 
-        'AU': (4, 6), 
-        'CN': (6, 6), 'IN': (6, 6), 'SG': (6, 6), 'TW': (3, 6),
-        'FR': (5, 5), 'ID': (5, 5), 'MX': (5, 5), 'MY': (5, 5),
-        'BE': (4, 4)
-    }
     
-    if country in rules:
-        min_len, max_len = rules[country]
+    if country in rules_dict:
+        # Handle tuple (min, max) from Excel loader
+        val = rules_dict[country]
+        if isinstance(val, tuple):
+            min_len, max_len = val
+        else:
+            # Fallback if dictionary has single int
+            min_len = max_len = int(val)
+
         curr_len = len(postal_str)
         
         if not (min_len <= curr_len <= max_len):
@@ -136,6 +103,284 @@ def get_primary_id(row):
 # ==========================================
 # 3. SMD ANALYSIS LOGIC (Hybrid Engine)
 # ==========================================
+
+def load_smd_config(config_file):
+    config = {
+        'field_rules': [],
+        'incoterms': {},
+        'postal_codes': {},
+        'reference_lists': {} # dynamic storage for lists
+    }
+    
+    if not config_file: return config
+
+    try:
+        xls = pd.ExcelFile(config_file)
+        
+        # 1. Field Rules
+        if 'Field_Rules' in xls.sheet_names:
+            df_rules = pd.read_excel(xls, 'Field_Rules')
+            df_rules.columns = [c.strip().title() for c in df_rules.columns]
+            config['field_rules'] = df_rules.to_dict('records')
+        
+        # 2. Incoterm Rules (Optional)
+        if 'Incoterm_Rules' in xls.sheet_names:
+            df_inco = pd.read_excel(xls, 'Incoterm_Rules')
+            # Normalize headers
+            df_inco.columns = [c.strip().title() for c in df_inco.columns] 
+            
+            # Store as list of dictionaries
+            config['incoterms'] = []
+            for _, row in df_inco.iterrows():
+                config['incoterms'].append({
+                    'code': str(row.get('Incoterm', '')).strip().upper(),
+                    'rule': str(row.get('Rule', '')).strip().lower(),
+                    'val': str(row.get('Value', '')).strip(),
+                    'msg': str(row.get('Error_Message', 'Incoterm Error')).strip()
+                })
+            
+        # 3. Postal Codes
+        if 'Postal_Codes' in xls.sheet_names:
+            df_postal = pd.read_excel(xls, 'Postal_Codes')
+            # Assuming format: Country | Min | Max
+            for _, row in df_postal.iterrows():
+                try:
+                    c = str(row.iloc[0]).strip().upper()
+                    mn = int(row.iloc[1])
+                    mx = int(row.iloc[2])
+                    config['postal_codes'][c] = (mn, mx)
+                except: pass
+
+        # 4. Reference Lists (Dynamic Loading)
+        # Any column found here becomes a validation list!
+        if 'Reference_Lists' in xls.sheet_names:
+            df_ref = pd.read_excel(xls, 'Reference_Lists')
+            for col in df_ref.columns:
+                # Clean column name (e.g., "REF_PAYT")
+                key = col.strip()
+                # Store set of valid values
+                config['reference_lists'][key] = set(df_ref[col].dropna().astype(str).str.strip())
+
+    except Exception as e:
+        st.error(f"Error reading SMD Config: {e}")
+    return config
+
+def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
+    df_out = df.copy()
+    df.columns = df.columns.str.strip()
+
+    # --- Rules ---
+    rules_data = load_smd_config(config_file)
+    field_rules = rules_data.get('field_rules', [])
+    ref_lists = rules_data.get('reference_lists', {})
+    postal_rules = rules_data.get('postal_codes', {})
+
+    # --- target porg (split by comma) ---
+    # example: "0001, 0002" -> ['0001', '0002']
+    valid_porg_list = []
+    if target_porg: 
+        valid_porg_list = [p.strip() for p in str(target_porg).split(',') if p.strip()]
+
+    # --- 1. DYNAMIC CONFIGURATION (Load Rules from Excel) ---
+    req_dict = {'Mandatory': [], 'Empty': [], 'InList': [], 'ContainsAny': []}
+    
+    for rule in field_rules:
+        field = str(rule.get('Field')).strip()
+        rtype = str(rule.get('Rule')).strip().lower()
+        cat = str(rule.get('Category', 'General')).strip()
+        val = str(rule.get('Value', '')).strip()
+        rule_region = str(rule.get('Region', 'ALL')).strip().upper()
+
+        if rule_region == 'ALL' or rule_region == region.upper():
+            rule_obj = {'field': field, 'cat': cat, 'val': val}
+            if 'mandatory' in rtype: req_dict['Mandatory'].append(rule_obj)
+            elif 'empty' in rtype: req_dict['Empty'].append(rule_obj)
+            elif 'inlist' in rtype: req_dict['InList'].append(rule_obj)
+            elif 'containsany' in rtype: req_dict['ContainsAny'].append(rule_obj)
+
+    # --- 2. HARDCODED LOGIC & COLUMN MAPPING ---
+    valid_vendor_ids = set()
+    if 'Vendor' in df.columns: valid_vendor_ids = set(df['Vendor'].astype(str).str.strip())
+    
+    col_payt_fin = 'PayT'
+    col_payt_purch = 'PayT.1' if 'PayT.1' in df.columns else 'PayT'
+    if region == 'EU':
+        col_payt_fin = 'PayT C.Co' if 'PayT C.Co' in df.columns else 'PayT'
+        col_payt_purch = 'PayT POrg' if 'PayT POrg' in df.columns else 'PayT'
+
+    all_error_details, p1_list_col, p2_list_col, p3_list_col, gen_list_col, bad_cells = [], [], [], [], [], []
+
+    def log_err(category_list, msg, col_name=None, idx=None):
+        category_list.append(msg)
+        if col_name and col_name in df.columns: bad_cells.append((idx, col_name))
+
+    # --- 3. EXECUTION ---
+    for index, row in df.iterrows():
+        p1, p2, p3, gen = [], [], [], [] 
+        country = str(row.get('Cty','')).strip().upper()
+        is_local = (country == 'MY')
+
+        # --- A. Apply Dynamic Rules (Excel) ---
+        def get_target_list(cat_name):
+            c = cat_name.lower()
+            if 'purchasing' in c: return p1
+            if 'org' in c or 'finance' in c: return p2
+            if 'master' in c or 'vendor' in c: return p3
+            return gen # default
+        
+        for item in req_dict['Mandatory']:
+            target_list = get_target_list(item['cat'])
+            if item['field'] in df.columns and not check_mandatory(row[item['field']]):
+                log_err(target_list, f"{item['field']} is missing", item['field'], index)
+        for item in req_dict['Empty']:
+            if item['field'] in df.columns and not check_must_be_empty(row[item['field']]):
+                log_err(target_list, f"{item['field']} must be empty", item['field'], index)
+        
+        # InList Check (Checks against Reference Lists)
+        for item in req_dict['InList']:
+            f_name = item['field']
+            ref_key = item['val'] # e.g. "REF_PAYT"
+            if f_name in df.columns:
+                val = str(row[f_name]).strip()
+                if check_mandatory(val):
+                    # Check if the list exists in our config
+                    if ref_key in ref_lists:
+                        if val not in ref_lists[ref_key]:
+                            log_err(get_target_list(item['cat']), f"{f_name} invalid (not in {ref_key})", f_name, index)
+                    else:
+                        # Optional: warn if list missing? skipping for now to avoid noise
+                        pass
+        
+        # ContainsAny Check (e.g. N,Q,S)
+        for item in req_dict['ContainsAny']:
+            f_name = item['field']
+            chars = [c.strip() for c in item['val'].split(',')]
+            if f_name in df.columns:
+                val = str(row[f_name]).strip()
+                if check_mandatory(val) and not any(c in val for c in chars):
+                    log_err(get_target_list(item['cat']), f"{f_name} missing required value", f_name, index)
+
+        # --- B. Hardcoded Business Logic (Things too complex for simple Excel rules) ---
+
+        # 1. Currency (Check all variations)
+        crcy_cols = [c for c in df.columns if 'crcy' in c.lower() or 'currency' in c.lower()]
+        if crcy_cols:
+            has_currency = any(check_mandatory(row[c]) for c in crcy_cols)
+            if not has_currency:
+                log_err(p1, "Currency missing (All Cols)", crcy_cols[0], index)
+
+        if col_payt_purch in df.columns and not check_mandatory(row[col_payt_purch]): log_err(p1, "Purch PayT Missing", col_payt_purch, index)
+        
+        # 2. Incoterms
+        if 'IncoT' in df.columns:
+            incot = str(row.get('IncoT', '')).strip().upper()
+            inco2 = str(row.get('Inco. 2', '')).strip().lower()
+
+            if check_mandatory(incot):
+                # Iterate through rules loaded from Excel
+                for rule in rules_data.get('incoterms', []):
+                    target_code = rule['code']
+                    rtype = rule['rule']
+                    rval = rule['val'].lower()
+                    msg = rule['msg']
+
+                    # Apply rule if code matches OR rule is for ALL
+                    if target_code == 'ALL' or target_code == incot:
+                        
+                        if rtype == 'contains':
+                            # Check if ANY of the values exist in Inco 2
+                            opts = [x.strip() for x in rval.split(',')]
+                            if not any(opt in inco2 for opt in opts):
+                                log_err(p1, msg, 'Inco. 2', index)
+
+                        elif rtype == 'startswith':
+                            # Check if Inco 2 starts with any option
+                            opts = [x.strip() for x in rval.split(',')]
+                            if not any(inco2.startswith(opt) for opt in opts):
+                                log_err(p1, msg, 'Inco. 2', index)
+
+                        elif rtype == 'equals' and rval == 'obsolete':
+                            # Flag the IncoT itself
+                            log_err(p1, msg, 'IncoT', index)
+
+            else:
+                log_err(p1, "IncoT missing", 'IncoT', index)
+
+        # 3. Payment Terms
+        if col_payt_fin in df.columns and col_payt_purch in df.columns:
+            fin, pur = str(row[col_payt_fin]).strip(), str(row[col_payt_purch]).strip()
+            if fin != pur: log_err(p2, f"PayT Mismatch ({fin} vs {pur})", col_payt_fin, index)
+        
+        # 4. Org Check
+        if 'CoCd' in df.columns and str(row['CoCd']).strip() != target_cocd: log_err(p2, f"CoCd != {target_cocd}", 'CoCd', index)
+        if 'POrg' in df.columns:
+            porg = str(row['POrg']).strip()
+            if valid_porg_list:
+                if check_mandatory(porg):
+                    if porg not in valid_porg_list: 
+                        log_err(p2, f"POrg != {valid_porg_list}", 'POrg', index)
+                else:
+                    log_err(p2, "POrg is missing", 'POrg', index)
+
+        # 5. Tax Logic (At least 1 required)
+        tax_candidates = [c for c in df.columns if ('tax' in c.lower() or 'vat' in c.lower()) 
+                          and 'identification' not in c.lower() and 'liable' not in c.lower() and 'equal' not in c.lower()]
+        if tax_candidates:
+            has_tax = any(check_mandatory(row[c]) for c in tax_candidates)
+            if not has_tax: 
+                gen.append("At least one Tax ID Required")
+                bad_cells.append((index, tax_candidates[0]))
+
+        # 6. Postal Code
+        if 'Postl Code' in df.columns:
+            postal_err = check_postal_code(country, row['Postl Code'], postal_rules)
+            if postal_err: log_err(gen, postal_err, 'Postl Code', index)
+
+        # 7. Duplicate Logic (Alt Payee Scope)
+        if 'AltPayeeAc' in df.columns:
+            alt = str(row['AltPayeeAc']).strip()
+            if check_mandatory(alt) and alt not in valid_vendor_ids:
+                log_err(p3, "AltPayee Not in Scope", 'AltPayeeAc', index)
+        
+        # 8. Telephone 1 logic
+        if 'Telephone 1' in df.columns:
+            phone = str(row['Telephone 1']).strip()
+
+            # Rule 1: Mandatory for Global
+            if not check_mandatory(phone): 
+                log_err(gen, "Tel 1 missing", 'Telephone 1', index)
+            
+            # Rule 2: "+" symbol only for CoCd 3072
+            elif str(target_cocd).strip() == '3072' and "+" not in phone: 
+                log_err(gen, "Tel 1 missing '+'", 'Telephone 1', index)
+                    
+        # 9. Synertrade Supplier ID
+        if 'Synertrade Supplier ID' in df.columns:
+                syn_id = str(row['Synertrade Supplier ID'])
+                if not check_mandatory(syn_id):
+                    log_err(p3, "Synertrade ID missing", 'Synertrade Supplier ID', index)
+
+        # Consolidate
+        all_errs = p1 + p2 + p3 + gen
+        all_error_details.append(" | ".join(all_errs))
+        p1_list_col.append(" | ".join(p1))
+        p2_list_col.append(" | ".join(p2))
+        p3_list_col.append(" | ".join(p3))
+        gen_list_col.append(" | ".join(gen))
+
+    df_out.insert(0, 'General_Errors', gen_list_col)
+    df_out.insert(0, 'Master_Data_Issues', p3_list_col)
+    df_out.insert(0, 'Org_Finance_Issues', p2_list_col)
+    df_out.insert(0, 'Purchasing_Issues', p1_list_col)
+    df_out.insert(0, 'Error_Details', all_error_details)
+    
+    df_out['Row_Index'] = df_out.index + 2
+    df_out['Primary_ID'] = df_out.apply(get_primary_id, axis=1)
+    df_out['Vendor_ID'] = df_out.get('Vendor', 'N/A')
+    df_out['Name_1'] = df_out.get('Name 1', 'N/A')
+    df_out['Company_Code'] = df_out.get('CoCd', 'N/A')
+    
+    return df_out, bad_cells
 
 def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error_breakdown_df, bad_cells):
     output = io.BytesIO()
@@ -287,174 +532,6 @@ def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error
             ws_dupe.set_column(0, 0, 30)
 
     return output.getvalue()
-
-def run_smd_analysis(df, requirements_df, target_cocd, target_porg, region):
-    df_out = df.copy()
-    df.columns = df.columns.str.strip()
-
-    # --- target porg (split by comma) ---
-    # example: "0001, 0002" -> ['0001', '0002']
-    valid_porg_list = []
-    if target_porg: 
-        valid_porg_list = [p.strip() for p in str(target_porg).split(',') if p.strip()]
-
-    # --- 1. DYNAMIC CONFIGURATION (Load Rules from Excel) ---
-    req_dict = {'Mandatory': [], 'Empty': []}
-    
-    if requirements_df is not None:
-        # Standardize headers
-        requirements_df.columns = [c.strip().title() for c in requirements_df.columns]
-        
-        # Check for required columns
-        if 'Field' in requirements_df.columns and 'Rule' in requirements_df.columns:
-            for idx, row in requirements_df.iterrows():
-                field = str(row['Field']).strip()
-                rule = str(row['Rule']).strip().lower()
-                
-                # Get Region & Category safely
-                rule_region = str(row['Region']).strip().upper() if 'Region' in requirements_df.columns else 'ALL'
-                cat = str(row['Category']).strip() if 'Category' in requirements_df.columns else 'General'
-                
-                # Apply if Region matches
-                if rule_region == 'ALL' or rule_region == region.upper():
-                    rule_obj = {'field': field, 'cat': cat}
-                    
-                    if 'mandatory' in rule: 
-                        req_dict['Mandatory'].append(rule_obj) # Append Dictionary
-                    if 'empty' in rule: 
-                        req_dict['Empty'].append(rule_obj)     # Append Dictionary
-
-    # --- 2. HARDCODED LOGIC & COLUMN MAPPING ---
-    valid_vendor_ids = set()
-    if 'Vendor' in df.columns: valid_vendor_ids = set(df['Vendor'].astype(str).str.strip())
-    
-    col_payt_fin = 'PayT'
-    col_payt_purch = 'PayT.1' if 'PayT.1' in df.columns else 'PayT'
-    if region == 'EU':
-        col_payt_fin = 'PayT C.Co' if 'PayT C.Co' in df.columns else 'PayT'
-        col_payt_purch = 'PayT POrg' if 'PayT POrg' in df.columns else 'PayT'
-
-    all_error_details, p1_list_col, p2_list_col, p3_list_col, gen_list_col, bad_cells = [], [], [], [], [], []
-
-    def log_err(category_list, msg, col_name=None, idx=None):
-        category_list.append(msg)
-        if col_name and col_name in df.columns: bad_cells.append((idx, col_name))
-
-    # --- 3. EXECUTION ---
-    for index, row in df.iterrows():
-        p1, p2, p3, gen = [], [], [], [] 
-        country = str(row.get('Cty','')).strip().upper()
-        is_local = (country == 'MY')
-
-        # --- A. Apply Dynamic Rules (Excel) ---
-        def get_target_list(cat_name):
-            c = cat_name.lower()
-            if 'purchasing' in c: return p1
-            if 'org' in c or 'finance' in c: return p2
-            if 'master' in c or 'vendor' in c: return p3
-            return gen # default
-        
-        for item in req_dict['Mandatory']:
-            target_list = get_target_list(item['cat'])
-            if item['field'] in df.columns and not check_mandatory(row[item['field']]):
-                log_err(target_list, f"{item['field']} is missing", item['field'], index)
-        for item in req_dict['Empty']:
-            if item['field'] in df.columns and not check_must_be_empty(row[item['field']]):
-                log_err(target_list, f"{item['field']} must be empty", item['field'], index)
-
-        # --- B. Hardcoded Business Logic (Things too complex for simple Excel rules) ---
-
-        # 1. Currency (Check all variations)
-        crcy_cols = [c for c in df.columns if 'crcy' in c.lower() or 'currency' in c.lower()]
-        if crcy_cols:
-            has_currency = any(check_mandatory(row[c]) for c in crcy_cols)
-            if not has_currency:
-                log_err(p1, "Currency missing (All Cols)", crcy_cols[0], index)
-
-        if col_payt_purch in df.columns and not check_mandatory(row[col_payt_purch]): log_err(p1, "Purch PayT Missing", col_payt_purch, index)
-        
-        # 2. Incoterms
-        if 'IncoT' in df.columns:
-            if not check_mandatory(row['IncoT']): log_err(p1, "Incoterms missing", 'IncoT', index)
-            elif 'Inco. 2' in df.columns:
-                if not check_mandatory(row['Inco. 2']): log_err(p1, "Inco. 2 missing", 'Inco. 2', index)
-                else: p1.extend(check_incoterm_rules(row))
-
-        # 3. Payment Terms
-        if col_payt_fin in df.columns and col_payt_purch in df.columns:
-            fin, pur = str(row[col_payt_fin]).strip(), str(row[col_payt_purch]).strip()
-            if fin != pur: log_err(p2, f"PayT Mismatch ({fin} vs {pur})", col_payt_fin, index)
-        
-        # 4. Org Check
-        if 'CoCd' in df.columns and str(row['CoCd']).strip() != target_cocd: log_err(p2, f"CoCd != {target_cocd}", 'CoCd', index)
-        if 'POrg' in df.columns:
-            porg = str(row['POrg']).strip()
-            if valid_porg_list:
-                if check_mandatory(porg):
-                    if porg not in valid_porg_list: 
-                        log_err(p2, f"POrg != {valid_porg_list}", 'POrg', index)
-                else:
-                    log_err(p2, "POrg is missing", 'POrg', index)
-
-        # 5. Tax Logic (At least 1 required)
-        tax_candidates = [c for c in df.columns if ('tax' in c.lower() or 'vat' in c.lower()) 
-                          and 'identification' not in c.lower() and 'liable' not in c.lower() and 'equal' not in c.lower()]
-        if tax_candidates:
-            has_tax = any(check_mandatory(row[c]) for c in tax_candidates)
-            if not has_tax: 
-                gen.append("At least one Tax ID Required")
-                bad_cells.append((index, tax_candidates[0]))
-
-        # 6. Postal Code
-        if 'Postl Code' in df.columns:
-            postal_err = check_postal_code(country, row['Postl Code'])
-            if postal_err: log_err(gen, postal_err, 'Postl Code', index)
-
-        # 7. Duplicate Logic (Alt Payee Scope)
-        if 'AltPayeeAc' in df.columns:
-            alt = str(row['AltPayeeAc']).strip()
-            if check_mandatory(alt) and alt not in valid_vendor_ids:
-                log_err(p3, "AltPayee Not in Scope", 'AltPayeeAc', index)
-        
-        # 8. Telephone 1 logic
-        if 'Telephone 1' in df.columns:
-            phone = str(row['Telephone 1']).strip()
-
-            # Rule 1: Mandatory for Global
-            if not check_mandatory(phone): 
-                log_err(gen, "Tel 1 missing", 'Telephone 1', index)
-            
-            # Rule 2: "+" symbol only for CoCd 3072
-            elif str(target_cocd).strip() == '3072' and "+" not in phone: 
-                log_err(gen, "Tel 1 missing '+'", 'Telephone 1', index)
-                    
-        # 9. Synertrade Supplier ID
-        if 'Synertrade Supplier ID' in df.columns:
-                syn_id = str(row['Synertrade Supplier ID'])
-                if not check_mandatory(syn_id):
-                    log_err(p3, "Synertrade ID missing", 'Synertrade Supplier ID', index)
-
-        # Consolidate
-        all_errs = p1 + p2 + p3 + gen
-        all_error_details.append(" | ".join(all_errs))
-        p1_list_col.append(" | ".join(p1))
-        p2_list_col.append(" | ".join(p2))
-        p3_list_col.append(" | ".join(p3))
-        gen_list_col.append(" | ".join(gen))
-
-    df_out.insert(0, 'General_Errors', gen_list_col)
-    df_out.insert(0, 'Master_Data_Issues', p3_list_col)
-    df_out.insert(0, 'Org_Finance_Issues', p2_list_col)
-    df_out.insert(0, 'Purchasing_Issues', p1_list_col)
-    df_out.insert(0, 'Error_Details', all_error_details)
-    
-    df_out['Row_Index'] = df_out.index + 2
-    df_out['Primary_ID'] = df_out.apply(get_primary_id, axis=1)
-    df_out['Vendor_ID'] = df_out.get('Vendor', 'N/A')
-    df_out['Name_1'] = df_out.get('Name 1', 'N/A')
-    df_out['Company_Code'] = df_out.get('CoCd', 'N/A')
-    
-    return df_out, bad_cells
 
 # ==========================================
 # 4. EMAIL ANALYSIS & MAIN UI
@@ -657,7 +734,9 @@ def run_po_analysis_dynamic(df, config_file):
     special_chars = str(settings.get('Banned_Chars', '</,/>,&')).split(',')
     banned_reqs = set([x.strip() for x in str(settings.get('Banned_Requestors', '')).split(',') if x.strip()])
     
-    small_val_limit = float(settings.get('Small Value Limit', 10.0))
+    try: small_val_limit = float(settings.get('Small Value Limit', 10.0))
+    except: small_val_limit = 10.0
+
     max_short = int(float(settings.get('Max_Short_Text_Length', 40)))
     max_req = int(float(settings.get('Max_Requestor_Length', 12)))
     max_prep = int(float(settings.get('Max_Preparer_Length', 12)))
@@ -712,22 +791,13 @@ def run_po_analysis_dynamic(df, config_file):
     }
 
     # --- 3. DATA PREPARATION ---
-    # Identify "comment" columns 
-    comment_cols = [c for c in df.columns if 'comment' in c.lower()]
-    # Identify all needed columns
-    needed_cols = [v for v in col_map.values() if v] + comment_cols
-    # Create a small view for processing
-    df_small = df[list(set(needed_cols))]
-
+    records = df.to_dict('records')
     category_list = ['PCN', 'Unit of Measurement', 'Requestor', 'Preparer', 'Split Accounting', 
                      'Text', 'Currency', 'Schedule Line', 'Vendor', 'Unloading Point', 
                      'Doc Type', 'Payment Term', 'FOC', 'Logic Checks', 'Additional Pricing', 'Incoterm']
     
-    results = {
-        'PO Category': [], 'PO Status': [], 'Remarks': [], 'Error_Details': []
-    }
-    for cat in category_list: results[f"{cat}_Remarks"] = []
-    
+    cat_remarks_collector = {cat: [] for cat in category_list}
+    po_categories, po_statuses, po_remarks, error_details = [], [], [], []
     bad_cells = []
 
     def safe_f(val):
@@ -736,7 +806,7 @@ def run_po_analysis_dynamic(df, config_file):
         except: return 0.0
 
     # --- 4. THE OPTIMIZED LOOP ---
-    for idx, row in df_small.iterrows():
+    for idx, row in enumerate(records):
         row_cat_errors = {cat: [] for cat in category_list}
         
         def get_v(key):
@@ -763,7 +833,7 @@ def run_po_analysis_dynamic(df, config_file):
         p_cat = "Direct PO" if mat_val != "" else ("Material PO" if gr_val == 'X' else "Service PO")
         
         # Matrix Logic (Simplified evaluation)
-        p_stat, p_rem = "Review", "No matching logic found"
+        p_stat, p_rem, rule_found = "Review", "No matching logic found", False
         for rule in matrix:
             match = True
             if str(rule.get('Category', '')).strip() and str(rule.get('Category', '')).strip() != p_cat: match = False
@@ -793,7 +863,7 @@ def run_po_analysis_dynamic(df, config_file):
                         target = r_cond.split('IR_EXIST=')[1].split(',')[0].replace('.', '').replace(' ', '')
                         if ir_clean != target: match = False
             if match:
-                p_stat, p_rem = rule.get('Status'), rule.get('Remark')
+                p_stat, p_rem, rule_found = rule.get('Status'), rule.get('Remark'), True
                 break
 
         # Hardcoded Filter Rule Overrides
@@ -904,21 +974,21 @@ def run_po_analysis_dynamic(df, config_file):
             if not check_mandatory(str(get_v('incot'))): log_e('Incoterm', "Incoterm is missing", 'incot')
 
         # --- 5. CONSOLIDATE ---
-        results['PO Category'].append(p_cat)
-        results['PO Status'].append(p_stat)
-        results['Remarks'].append(p_rem)
-
+        po_categories.append(p_cat); po_statuses.append(p_stat); po_remarks.append(p_rem)
         row_joined_errs = []
         for cat in category_list:
             msg = " | ".join(row_cat_errors[cat])
-            results[f"{cat}_Remarks"].append(msg)
+            cat_remarks_collector[cat].append(msg)
             if msg: row_joined_errs.append(msg)
-        results['Error_Details'].append(" | ".join(row_joined_errs))
+        error_details.append(" | ".join(row_joined_errs))
 
     # --- 6. FINAL BUILD ---
-    df_results = pd.DataFrame(results)
-    # Concate results to original DF 
-    df_out = pd.concat([df_results, df], axis=1)
+    df_out = df.copy()
+    df_out.insert(0, 'PO Category', po_categories)
+    df_out.insert(1, 'PO Status', po_statuses)
+    df_out.insert(2, 'Remarks', po_remarks)
+    df_out.insert(3, 'Error_Details', error_details)
+    for cat in category_list: df_out[f"{cat}_Remarks"] = cat_remarks_collector[cat]
     
     return df_out, bad_cells, category_list
 
@@ -1092,14 +1162,8 @@ def main():
     elif task == "SMD Analysis": 
         st.title(f"SMD Validation ({region_mode})")
         
-        st.subheader("1. Upload Rules Config (Optional)")
+        st.subheader("1. Upload Rules Config")
         req_file = st.file_uploader("Upload 'SMD_Rules_Config.xlsx'", type=['xlsx'], key='smd_req')
-        
-        req_df = None
-        if req_file:
-            req_df = pd.read_excel(req_file)
-            st.success("Custom Rules Loaded")
-            with st.expander("View Rules"): st.dataframe(req_df)
 
         st.subheader("2. Upload Raw Data")
         uploaded_file = st.file_uploader("Upload Raw Data", type=['xlsx'], key='smd_raw')
@@ -1120,7 +1184,7 @@ def main():
                 else:
                     df = pd.concat(all_dfs, ignore_index=True)
 
-                    results, bad_cells = run_smd_analysis(df, req_df, target_cocd, target_porg, region_mode)
+                    results, bad_cells = run_smd_analysis(df, req_file, target_cocd, target_porg, region_mode)
                     duplicates_df = get_duplicates_df(df)
                     
                     df_errors_only = results[results['Error_Details'] != ""]

@@ -791,13 +791,22 @@ def run_po_analysis_dynamic(df, config_file):
     }
 
     # --- 3. DATA PREPARATION ---
-    records = df.to_dict('records')
+    # Identify "comment" columns 
+    comment_cols = [c for c in df.columns if 'comment' in c.lower()]
+    # Identify all needed columns
+    needed_cols = [v for v in col_map.values() if v] + comment_cols
+    # Create a small view for processing
+    df_small = df[list(set(needed_cols))]
+
     category_list = ['PCN', 'Unit of Measurement', 'Requestor', 'Preparer', 'Split Accounting', 
                      'Text', 'Currency', 'Schedule Line', 'Vendor', 'Unloading Point', 
                      'Doc Type', 'Payment Term', 'FOC', 'Logic Checks', 'Additional Pricing', 'Incoterm']
     
-    cat_remarks_collector = {cat: [] for cat in category_list}
-    po_categories, po_statuses, po_remarks, error_details = [], [], [], []
+    results = {
+        'PO Category': [], 'PO Status': [], 'Remarks': [], 'Error_Details': []
+    }
+    for cat in category_list: results[f"{cat}_Remarks"] = []
+    
     bad_cells = []
 
     def safe_f(val):
@@ -806,7 +815,7 @@ def run_po_analysis_dynamic(df, config_file):
         except: return 0.0
 
     # --- 4. THE OPTIMIZED LOOP ---
-    for idx, row in enumerate(records):
+    for idx, row in df_small.iterrows():
         row_cat_errors = {cat: [] for cat in category_list}
         
         def get_v(key):
@@ -836,11 +845,15 @@ def run_po_analysis_dynamic(df, config_file):
         p_stat, p_rem, rule_found = "Review", "No matching logic found", False
         for rule in matrix:
             match = True
-            if str(rule.get('Category', '')).strip() and str(rule.get('Category', '')).strip() != p_cat: match = False
+            # Check Category match
+            r_c = str(rule.get('Category', '')).strip()
+            if r_c and r_c != p_cat: match = False
+            # Check GR Flag
             if match:
                 r_gr = str(rule.get('GR', '')).strip().upper()
                 if r_gr == 'X' and gr_val != 'X': match = False
                 elif r_gr == 'EMPTY' and gr_val != '': match = False
+            # Check Material Flag
             if match:
                 r_mat = str(rule.get('Material', '')).strip().upper()
                 if r_mat == 'FILLED' and mat_val == '': match = False
@@ -856,7 +869,7 @@ def run_po_analysis_dynamic(df, config_file):
                     if 'PAYQTY=0' in r_cond and still_pay_qty != 0: match = False
                     if 'PAYQTY>0' in r_cond and still_pay_qty <= 0: match = False
                     if 'PAYQTY<0' in r_cond and still_pay_qty >= 0: match = False
-                    if 'PAYAMT=0' in r_cond and still_pay_qty != 0: match = False
+                    if 'PAYAMT=0' in r_cond and still_pay_amt != 0: match = False
                     if 'PAYAMT>0' in r_cond and still_pay_amt <= 0: match = False
                     if 'PAYAMT<0' in r_cond and still_pay_amt >= 0: match = False
                     if 'IR_EXIST=' in r_cond:
@@ -974,21 +987,21 @@ def run_po_analysis_dynamic(df, config_file):
             if not check_mandatory(str(get_v('incot'))): log_e('Incoterm', "Incoterm is missing", 'incot')
 
         # --- 5. CONSOLIDATE ---
-        po_categories.append(p_cat); po_statuses.append(p_stat); po_remarks.append(p_rem)
+        results['PO Category'].append(p_cat)
+        results['PO Status'].append(p_stat)
+        results['Remarks'].append(p_rem)
+
         row_joined_errs = []
         for cat in category_list:
             msg = " | ".join(row_cat_errors[cat])
-            cat_remarks_collector[cat].append(msg)
+            results[f"{cat}_Remarks"].append(msg)
             if msg: row_joined_errs.append(msg)
-        error_details.append(" | ".join(row_joined_errs))
+        results['Error_Details'].append(" | ".join(row_joined_errs))
 
     # --- 6. FINAL BUILD ---
-    df_out = df.copy()
-    df_out.insert(0, 'PO Category', po_categories)
-    df_out.insert(1, 'PO Status', po_statuses)
-    df_out.insert(2, 'Remarks', po_remarks)
-    df_out.insert(3, 'Error_Details', error_details)
-    for cat in category_list: df_out[f"{cat}_Remarks"] = cat_remarks_collector[cat]
+    df_results = pd.DataFrame(results)
+    # Concate results to original DF 
+    df_out = pd.concat([df_results, df], axis=1)
     
     return df_out, bad_cells, category_list
 

@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np 
 import io
 import re
+import xlsxwriter
 
 # ==========================================
 # 1. PAGE CONFIGURATION
@@ -840,9 +841,16 @@ def run_po_analysis_dynamic(df, config_file):
 
         # PO Category Determination
         p_cat = "Direct PO" if mat_val != "" else ("Material PO" if gr_val == 'X' else "Service PO")
+        p_stat, p_rem, rule_found = "Review", "No matching logic found", False
+
+        if p_cat == "Direct PO":
+            p_stat = "Excluded"
+            p_rem = "No further action needed."
+            rule_found = True
+        else:
+            p_cat = "Material PO" if gr_val == 'X' else "Service PO"
         
         # Matrix Logic (Simplified evaluation)
-        p_stat, p_rem, rule_found = "Review", "No matching logic found", False
         for rule in matrix:
             match = True
             # Check Category match
@@ -1007,9 +1015,25 @@ def run_po_analysis_dynamic(df, config_file):
 
 def to_excel_po_download(full_df, bad_cells, category_list):
     output = io.BytesIO()
+
+    # Create view of the columns want to keep
+    drop_cols = ['Error_Details'] + [f"{c}_Remarks" for c in category_list]
+    cols_to_keep = [c for c in full_df.columns if c not in drop_cols]
+    clean_df = full_df[cols_to_keep]
+
+    for col in clean_df.columns:
+        c_low = col.lower()
+        if any(x in c_low for x in ['price', 'amt', 'amount', 'net', 'value', 'qty', 'quantity', 'saa', 'conversion', 'per']):
+            # Remove commas if they are strings, then convert to float
+            clean_df[col] = pd.to_numeric(clean_df[col].astype(str).str.replace(',', ''), errors='coerce')
+
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
         workbook = writer.book
-        red_foramt = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+        num_fmt_str = '#,##0.00####'
+        num_fmt = workbook.add_format({'num_format': num_fmt_str})
+        red_num_fmt = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006', 'num_format': num_fmt_str})
+        red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+        direct_po_format = workbook.add_format({'bg_color': "#D4D436", 'font_color': "#000000"})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
         bold_format = workbook.add_format({'bold': True})
 
@@ -1053,13 +1077,40 @@ def to_excel_po_download(full_df, bad_cells, category_list):
         ws0.set_column(1, 1, 40)
 
         # Raw Data
-        # drop helper columns
-        drop_cols = ['Error_Details'] + [f"{c}_Remarks" for c in category_list]
-        clean_df = full_df.drop(columns=[c for c in drop_cols if c in full_df.columns])
+        # Convert all NaN to empty strings or 0 to avoid Excel errors
         clean_df.to_excel(writer, index=False, sheet_name='Full_Raw_Data')
         ws1 = writer.sheets['Full_Raw_Data']
 
-        for i, col in enumerate(clean_df.columns): ws1.write(0, i, col, header_format)
+        # Tracking which columns are numeric 
+        numeric_col_indices = set()
+
+        for i, col in enumerate(clean_df.columns): 
+            ws1.write(0, i, col, header_format)
+            c_low = str(col).lower()
+
+            # If all this columns found, apply the format
+            if any(x in c_low for x in ['price', 'amount', 'net', 'value', 'qty', 'quantity', 'amt', 'saa', 'conversion', 'per']):
+                ws1.set_column(i, i, 18, num_fmt)
+                numeric_col_indices.add(i)
+            else: 
+                ws1.set_column(i, i, 15)
+
+        # highlight Direct PO
+        try:
+            cat_col_idx = clean_df.columns.get_loc('PO Category')
+            # Convert index to Excel column letter
+            col_letter = xlsxwriter.utility.xl_col_to_name(cat_col_idx)
+
+            # Apply formatting to the whole table range
+            num_rows = len(clean_df)
+            num_cols = len(clean_df.columns)
+
+            ws1.conditional_format(1, 0, num_rows, num_cols - 1, {
+                'type':     'formula',
+                'criteria': f'=${col_letter}2="Direct PO"',
+                'format':   direct_po_format
+            })
+        except: pass # Fallback if column not found
 
         # highlight cells 
         col_map = {name: i for i, name in enumerate(clean_df.columns)}
@@ -1069,8 +1120,12 @@ def to_excel_po_download(full_df, bad_cells, category_list):
                 excel_row_idx = row_idx + 1
                 try: 
                     val = clean_df.iat[row_idx, excel_col_idx]
-                    if pd.isna(val): ws1.write_blank(excel_row_idx, excel_col_idx, None, red_foramt)
-                    else: ws1.write(excel_row_idx, excel_col_idx, val, red_foramt)
+                    if excel_col_idx in numeric_col_indices:
+                        current_format = red_num_fmt
+                    else:
+                        current_format = red_format
+                    if pd.isna(val): ws1.write_blank(excel_row_idx, excel_col_idx, None, current_format)
+                    else: ws1.write(excel_row_idx, excel_col_idx, val, current_format)
                 except: pass
         ws1.freeze_panes(1, 0)
 

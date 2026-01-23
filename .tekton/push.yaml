@@ -25,8 +25,7 @@ spec:
       - name: revision
         value: $(params.revision)
       taskRef:
-        kind: ClusterTask
-        name: ifx-s2i-python
+        name: git-clone
       workspaces:
       - name: output
         workspace: source

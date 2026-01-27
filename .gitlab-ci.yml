@@ -1,0 +1,17 @@
+stages:
+  - build
+
+build_to_harbor:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    # This sends your app to Infineon's Harbor Registry
+    # Replace 'rafeli' with your Short ID if it's different
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "harbor.infineon.com/rafeli/procurement-workbench:latest"
+  only:
+    - main

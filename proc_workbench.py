@@ -6,7 +6,7 @@ import re
 import xlsxwriter
 
 # ==========================================
-# 1. PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION - Layout
 # ==========================================
 st.set_page_config(
     page_title="Procurement Workbench",
@@ -23,9 +23,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. HELPER FUNCTIONS
-# ==========================================
+# ===========================================================
+# 2. HELPER FUNCTIONS - Mandatory functions for Analysis
+# ===========================================================
 
 def check_mandatory(value):
     if pd.isna(value): return False
@@ -811,8 +811,11 @@ def run_po_analysis_dynamic(df, config_file):
     bad_cells = []
 
     def safe_f(val):
-        if val is None or val == '' or val != val: return 0.0
-        try: return float(str(val).replace(',', ''))
+        if pd.isna(val) or str(val).strip() == '': return 0.0
+        try:
+            # This handles both value; "2350.00" and "2,350.00"
+            clean_val = str(val).replace(',', '').strip()
+            return float(clean_val)
         except: return 0.0
 
     # --- 4. THE OPTIMIZED LOOP ---
@@ -1008,6 +1011,8 @@ def run_po_analysis_dynamic(df, config_file):
 
     # --- 6. FINAL BUILD ---
     df_results = pd.DataFrame(results)
+    df_results = df_results.reset_index(drop=True)
+    df = df.reset_index(drop=True)
     # Concate results to original DF 
     df_out = pd.concat([df_results, df], axis=1)
     
@@ -1017,31 +1022,41 @@ def to_excel_po_download(full_df, bad_cells, category_list):
     output = io.BytesIO()
 
     # Create view of the columns want to keep
+    analysis_headers = ['PO Category', 'PO Status', 'Remarks']
     drop_cols = ['Error_Details'] + [f"{c}_Remarks" for c in category_list]
-    cols_to_keep = [c for c in full_df.columns if c not in drop_cols]
-    clean_df = full_df[cols_to_keep]
-
-    for col in clean_df.columns:
-        c_low = col.lower()
-        if any(x in c_low for x in ['price', 'amt', 'amount', 'net', 'value', 'qty', 'quantity', 'saa', 'conversion', 'per']):
-            # Remove commas if they are strings, then convert to float
-            clean_df[col] = pd.to_numeric(clean_df[col].astype(str).str.replace(',', ''), errors='coerce')
-
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
+    cols_to_keep = [c for c in full_df.columns if c not in (analysis_headers) + (drop_cols)]
+    display_cols = analysis_headers + cols_to_keep
+    clean_df = full_df[display_cols].fillna('').astype(str)
+    
+    writer_options = {'options': {'strings_to_numbers': False, 'constant_memory': True}}
+    with pd.ExcelWriter(output, engine='xlsxwriter', engine_kwargs=writer_options) as writer: 
         workbook = writer.book
-        num_fmt_str = '#,##0.00####'
-        num_fmt = workbook.add_format({'num_format': num_fmt_str})
-        red_num_fmt = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006', 'num_format': num_fmt_str})
+        
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         direct_po_format = workbook.add_format({'bg_color': "#D4D436", 'font_color': "#000000"})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
         bold_format = workbook.add_format({'bold': True})
 
+        # define the precision masks
+        red_base = {'bg_color': '#FFC7CE', 'font_color': '#9C0006'}
+        masks = {
+            'text': None, 
+            'id': '0', 
+            '1dec': '#,##0.0',
+            '2dec': '#,##0.00', 
+            '3dec': '#,##0.000'
+        }
+        formats = {}
+        for name, mask in masks.items():
+            props = {'num_format': mask} if mask else {}
+            formats[name] = workbook.add_format(props)
+            formats[f"red_{name}"] = workbook.add_format({**props, **red_base})
+
         # metrics calculation 
         total = len(full_df)
         errors = len(full_df[full_df['Error_Details'] != ""])
 
-        # Dashboard 
+        # --- Dashboard ---
         ws0 = workbook.add_worksheet('Dashboard_Summary')
         ws0.write('B2', "PO Analysis Summary", header_format)
         ws0.write('C2', "Count", header_format)
@@ -1076,105 +1091,138 @@ def to_excel_po_download(full_df, bad_cells, category_list):
 
         ws0.set_column(1, 1, 40)
 
-        # Raw Data
-        # Convert all NaN to empty strings or 0 to avoid Excel errors
-        clean_df.to_excel(writer, index=False, sheet_name='Full_Raw_Data')
-        ws1 = writer.sheets['Full_Raw_Data']
+        # --- Raw Data ---
+        ws1 = workbook.add_worksheet('Full_Raw_Data')
 
-        # Tracking which columns are numeric 
-        numeric_col_indices = set()
+        # Precision detection loop
+        col_map = {}
+        for c_idx, col_name in enumerate(clean_df.columns):
+            ws1.write_string(0, c_idx, col_name, header_format)
 
-        for i, col in enumerate(clean_df.columns): 
-            ws1.write(0, i, col, header_format)
-            c_low = str(col).lower()
+            # scan first 100 rows of this column to detect the precision style
+            sample = clean_df[col_name].astype(str).sample(n=min(len(clean_df), 100))
+            precision = 'text'
+            for val in sample:
+                if val == '' or val.lower() == 'nan': continue
+                try:
+                    float(val.replace(',', ''))
+                    if '.' in val: 
+                        decimals = len(val.split('.')[1])
+                        if decimals >= 3: precision = '3dec'; break
+                        elif decimals == 2: 
+                            if precision != '3dec': precision = '2dec'
+                        elif decimals == 1:
+                            if precision not in ['2dec', '3dec']: precision = '1dec'
+                    elif precision not in ['1dec', '2dec', '3dec']: precision = 'id'
+                except: 
+                    precision = 'text'; break
+        
+            col_map[c_idx] = precision
+            ws1.set_column(c_idx, c_idx, 18)
 
-            # If all this columns found, apply the format
-            if any(x in c_low for x in ['price', 'amount', 'net', 'value', 'qty', 'quantity', 'amt', 'saa', 'conversion', 'per']):
-                ws1.set_column(i, i, 18, num_fmt)
-                numeric_col_indices.add(i)
-            else: 
-                ws1.set_column(i, i, 15)
+        # Data loop
+        error_lookup = set(bad_cells)
 
-        # highlight Direct PO
+        for r_idx, row in enumerate(clean_df.itertuples(index=False)):
+            excel_row = r_idx + 1
+            for c_idx, val in enumerate(row):
+                col_name = clean_df.columns[c_idx]
+                style_key = col_map[c_idx]
+
+                # check if this cell has an error
+                is_error = (r_idx, col_name) in error_lookup
+                fmt = formats[f"red_{style_key}" if is_error else style_key]
+
+                # Write logic: empty strings or text stay as strings
+                if style_key == 'text' or str(val) == '':
+                    ws1.write_string(excel_row, c_idx, str(val), fmt)
+                else:
+                    try:
+                        # Convert to number so Excel applies the .000 mask
+                        num = float(str(val).replace(',', ''))
+                        ws1.write_number(excel_row, c_idx, num, fmt)
+                    except:
+                        ws1.write_string(excel_row, c_idx, str(val), fmt)
+        
+        # Direct PO
         try:
             cat_col_idx = clean_df.columns.get_loc('PO Category')
-            # Convert index to Excel column letter
             col_letter = xlsxwriter.utility.xl_col_to_name(cat_col_idx)
-
-            # Apply formatting to the whole table range
-            num_rows = len(clean_df)
-            num_cols = len(clean_df.columns)
-
-            ws1.conditional_format(1, 0, num_rows, num_cols - 1, {
+            ws1.conditional_format(1, 0, len(clean_df), len(clean_df.columns)-1, {
                 'type':     'formula',
                 'criteria': f'=${col_letter}2="Direct PO"',
                 'format':   direct_po_format
             })
-        except: pass # Fallback if column not found
+        except: pass
 
-        # highlight cells 
-        col_map = {name: i for i, name in enumerate(clean_df.columns)}
-        for row_idx, col_name in bad_cells:
-            if col_name in col_map: 
-                excel_col_idx = col_map[col_name]
-                excel_row_idx = row_idx + 1
-                try: 
-                    val = clean_df.iat[row_idx, excel_col_idx]
-                    if excel_col_idx in numeric_col_indices:
-                        current_format = red_num_fmt
-                    else:
-                        current_format = red_format
-                    if pd.isna(val): ws1.write_blank(excel_row_idx, excel_col_idx, None, current_format)
-                    else: ws1.write(excel_row_idx, excel_col_idx, val, current_format)
-                except: pass
-        ws1.freeze_panes(1, 0)
+        ws1.ignore_errors({'number_stored_as_text': 'A1:XFD1048576'})
+        ws1.freeze_panes(1, 3)
 
         # Other sheets
         # Errors Categories Tabs
         for cat in category_list: 
             col_name = f"{cat}_Remarks"
             if col_name in full_df.columns: 
-                subset = full_df[full_df[col_name] != ""]
+                mask = full_df[col_name].str.strip() != ""
+                subset = full_df[mask].copy()
                 if not subset.empty: 
-                    # Raw data + ONLY the specific remark column
-                    # Remove other internal columns 
-                    base_data = subset.drop(columns=[c for c in drop_cols if c != col_name and c in subset.columns])
+                    ws_err = workbook.add_worksheet(cat[:30])
+                    # Reorder: Remark first, then raw data
+                    err_display = [col_name] + display_cols
+                    err_df = subset[err_display].fillna('').astype(str)
+                    
+                    for c_idx, c_name in enumerate(err_df.columns):
+                        ws_err.write_string(0, c_idx, c_name, header_format)
+                    for r_idx, row in enumerate(err_df.itertuples(index=False)):
+                        for c_idx, val in enumerate(row):
+                            if c_idx == 0:
+                                ws_err.write_string(r_idx+1, c_idx, str(val))
+                            else:
+                                style_key = col_map[c_idx - 1]
+                                fmt = formats[style_key]
 
-                    # Move remark to front
-                    cols = [col_name] + [c for c in base_data.columns if c != col_name]
-                    final_view = base_data[cols]
+                                if style_key == 'text' or str(val) == '':
+                                    ws_err.write_string(r_idx+1, c_idx, str(val), fmt)
+                                else:
+                                    try:
+                                        ws_err.write_number(r_idx+1, c_idx, float(str(val).replace(',', '')), fmt)
+                                    except:
+                                        ws_err.write_string(r_idx+1, c_idx, str(val), fmt)
 
-                    final_view.to_excel(writer, index=False, sheet_name=cat[:30]) # Sheet name limit 31 chars
-
-                    # Header format
-                    ws = writer.sheets[cat[:30]]
-                    for i, c in enumerate(final_view.columns): ws.write(0, i, c, header_format)
-                    ws.set_column(0, 0, 50)
+                    ws_err.ignore_errors({'number_stored_as_text': 'A1:XFD1048576'})
+                    ws_err.set_column(0, 0, 50)
+                    ws_err.set_column(1, len(err_df.columns)-1, 18)
 
         # Status Tabs
         if 'PO Status' in full_df.columns:
-            unique_statuses = full_df['PO Status'].unique()
-            for status in unique_statuses:
-                # Filter rows with this status 
-                status_subset = clean_df[clean_df['PO Status'] == status]
-
-                if not status_subset.empty:
-                    # clean sheet name (remove invalid characters)
+            for status in full_df['PO Status'].unique():
+                stat_df = clean_df[clean_df['PO Status'] == status]
+                if not stat_df.empty:
                     sheet_name = f"Status_{str(status)[:20]}".replace('/', '_')
+                    ws_stat = workbook.add_worksheet(sheet_name)
+                    for c_idx, c_name in enumerate(stat_df.columns):
+                        ws_stat.write_string(0, c_idx, c_name, header_format)
+                    for r_idx, row in enumerate(stat_df.itertuples(index=False)):
+                        for c_idx, val in enumerate(row):
+                            style_key = col_map[c_idx]
+                            fmt = formats[style_key]
 
-                    status_subset.to_excel(writer, index=False, sheet_name=sheet_name)
-
-                    # Apply formatting
-                    ws_stat = writer.sheets[sheet_name]
-                    for i, c in enumerate(status_subset.columns): ws_stat.write(0, i, c, header_format)
-                    ws_stat.set_column(0, len(status_subset.columns)-1, 15)
+                            if style_key == 'text' or str(val) == '':
+                                ws_stat.write_string(r_idx+1, c_idx, str(val), fmt)
+                            else:
+                                try:
+                                    ws_stat.write_number(r_idx+1, c_idx, float(str(val).replace(',', '')), fmt)
+                                except:
+                                    ws_stat.write_string(r_idx+1, c_idx, str(val), fmt)
+                    ws_stat.ignore_errors({'number_stored_as_text': 'A1:XFD1048576'})
+                    ws_stat.set_column(0, len(stat_df.columns)-1, 18)
                     ws_stat.freeze_panes(1, 3)
 
     return output.getvalue()
 
 
 # =================================
-# USER INTERFACE
+# USER INTERFACE - Web Display
 # =================================
 
 def main(): 
@@ -1295,7 +1343,7 @@ def main():
                     all_dfs = []
                     for sheet_name in xls.sheet_names:
                         try: 
-                            sheet_df = pd.read_excel(po_raw_file, sheet_name=sheet_name, dtype=str, keep_default_na=False, na_values=None)
+                            sheet_df = pd.read_excel(po_raw_file, sheet_name=sheet_name, keep_default_na=False, na_values=None)
                             all_dfs.append(sheet_df)
                         except: pass
                     

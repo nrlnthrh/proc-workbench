@@ -1,25 +1,55 @@
-# Procurement Workbench v9.0
+PROCleans v9.0
 
-## Overview
-Procurement Workbench is a Streamlit-based web application designed to automate the validation and analysis of procurement data. It uses a **Hybrid Rule Engine** that combines hardcoded business logic with dynamic rules loaded from external configuration files.
+📄 Overview
+**PROCleans** is a high-performance data auditing suite built with Streamlit. It automates the validation of procurement datasets by utilizing a **Hybrid Rule Engine**, combining hardcoded financial logic with dynamic, user-definable rules managed via Excel configuration files.
 
-## Features
-- **SMD Analysis:** Regional validation (APAC/EU), duplicate detection, and dynamic field-rule enforcement via Excel configuration.
-- **PO Analysis:** Intelligent PO status classification (Service vs. Material vs. Direct) and audit of 16+ categories including PCN, UOM, and Split Accounting.
-- **Email Validation:** Data integrity checks for vendor contact lists.
-- **Automated Reporting:** Generates professionally formatted Excel workbooks with color-coded errors and dashboard summaries.
+✨ Key Features
+- **SMD Analysis:** Regional validation (APAC), postal code integrity, and Synertrade-to-Vendor duplicate detection.
+- **PO Analysis:** Automated classification (Indirect Service/Indirect Material/Direct) and audit of 16+ categories including PCN, UOM, and Text/Special Character checks.
+- **Email Validation:** Chronological ID logic to ensure primary contact default flags are correctly assigned.
+- **Automated Reporting:** Generates professional formatted excel file (.xlsx) reports with dashboard summaries and color-coded error highlighting. 
 
-## Installation
-1. Ensure Python 3.9+ is installed.
+⚙️ Installation & Setup
+1. Prerequisites
+   - Python 3.9 or higher
+   - Microsoft Excel (to manage the configuration file)
+
 2. Install dependencies:
-   <> bash 
-   pip install streamlit pandas numpy xlsxwriter
+   Open your terminal/command prompt and run:
+     ---------------------------------------------------------------
+     | <> bash                                                    |
+     | ---------------------------------------------------------- |
+     | pip install streamlit pandas numpy xlsxwriter openpyxl     |
+     ---------------------------------------------------------------  
 
-# HOW TO RUN
-<> bash
-streamlit run proc_workbench.py
+3. Project Structure
+   To ensure the app runs correctly, organize your folder like this: 
+   _______________________________________________________________
+   | <> Text                                                     |
+   |------------------------------------------------------------ |
+   | PROCleans/                                      |
+   | |- proc_workbench.py                                        |
+   | |- SMD_Rules_Config.xlsx                                    |
+   | |- PO_Rules_Config.xlsx                                     |
+   | |- requirements.txt                                         |
+   |_____________________________________________________________|
 
-# CONFIGURATION
-The tool relies on two primary configuration files: 
-   **1. SMD_Rules_Config.xlsx:** Contains rules for mandatory fields, postal codes, and reference lists. 
-   **2. PO_Rules_Config.xlsx:** Contains the logic matrix for PO status and standard rule parameters.
+   # HOW TO RUN
+   In your terminal, navigate to the project folder and execute:
+     ---------------------------------------------------------------
+     | <> bash                                                    |
+     | ---------------------------------------------------------- |
+     | streamlit run proc_workbench.py                            |
+     ---------------------------------------------------------------  
+
+   # CONFIGURATION
+   The workbench is designed to be "No-Code" for daily updates. You can chance logic without touching the Python script by editing the following files: 
+      **1. SMD_Rules_Config.xlsx:** Define mandatory fields, allowed values in dropdowns (Reference Lists), and postal code lengths by country. 
+      **2. PO_Rules_Config.xlsx:** Manage the Logic Matrix (setting status to Open/Review/Close based on the PO requirements) and update banned requester lists or PCN codes.
+
+📊 Usage Workflow
+   1. Launch the app vie the command line. 
+   2. Select your desired module (SMD, PO, or Email) from the Sidebar.
+   3. Upload the corresponding Rules Config file first.
+   4. Upload your Raw Data file.
+   5. Click *"Run Analysis"* and download the generated Excel report.

@@ -1,4 +1,4 @@
-PROCleans v9.0
+PROCleans
 
 📄 Overview
 **PROCleans** is a high-performance data auditing suite built with Streamlit. It automates the validation of procurement datasets by utilizing a **Hybrid Rule Engine**, combining hardcoded financial logic with dynamic, user-definable rules managed via Excel configuration files.

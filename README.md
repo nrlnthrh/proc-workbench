@@ -24,15 +24,15 @@ PROCleans v9.0
 
 3. Project Structure
    To ensure the app runs correctly, organize your folder like this: 
-   _______________________________________________________________
-   | <> Text                                                     |
-   |------------------------------------------------------------ |
-   | PROCleans/                                      |
-   | |- proc_workbench.py                                        |
-   | |- SMD_Rules_Config.xlsx                                    |
-   | |- PO_Rules_Config.xlsx                                     |
-   | |- requirements.txt                                         |
-   |_____________________________________________________________|
+   __________________________________________________________________
+   | <> Text                                                        |
+   |------------------------------------------------------------    |
+   | PROCleans/                                                     |
+   | |- proc_workbench.py           # The main application code     |
+   | |- SMD_Rules_Config.xlsx       # Rules for SMD Analysis        |
+   | |- PO_Rules_Config.xlsx        # Logic matrix for PO Analysis  |
+   | |- requirements.txt            # List of dependencies          |
+   |________________________________________________________________|
 
    # HOW TO RUN
    In your terminal, navigate to the project folder and execute:

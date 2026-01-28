@@ -19,29 +19,25 @@
    Open your terminal/command prompt and run:
       
       ```bash
-         pip install streamlit pandas numpy xlsxwriter openpyxl
+      pip install streamlit pandas numpy xlsxwriter openpyxl
 
 3. Project Structure
    To ensure the app runs correctly, organize your folder like this: 
-   __________________________________________________________________
-   | <> Text                                                        |
-   |------------------------------------------------------------    |
-   | PROCleans/                                                     |
-   | |- proc_workbench.py           # The main application code     |
-   | |- SMD_Rules_Config.xlsx       # Rules for SMD Analysis        |
-   | |- PO_Rules_Config.xlsx        # Logic matrix for PO Analysis  |
-   | |- requirements.txt            # List of dependencies          |
-   |________________________________________________________________|
 
-   # HOW TO RUN
+      ```Text
+      PROCleans/
+      |- proc_workbench.py                # The main application code
+      |- SMD_Rules_Config.xlsx            # Rules for SMD Analysis
+      |- PO_Rules_Config.xlsx             # Logic matrix for PO Analysis
+      |- requirements.txt                 # List of dependencies
+
+# HOW TO RUN
    In your terminal, navigate to the project folder and execute:
-     ---------------------------------------------------------------
-     | <> bash                                                    |
-     | ---------------------------------------------------------- |
-     | streamlit run proc_workbench.py                            |
-     ---------------------------------------------------------------  
+   
+      ```bash
+      streamlit run proc_workbench.py
 
-   # CONFIGURATION
+# CONFIGURATION
    The workbench is designed to be "No-Code" for daily updates. You can chance logic without touching the Python script by editing the following files: 
       **1. SMD_Rules_Config.xlsx:** Define mandatory fields, allowed values in dropdowns (Reference Lists), and postal code lengths by country. 
       **2. PO_Rules_Config.xlsx:** Manage the Logic Matrix (setting status to Open/Review/Close based on the PO requirements) and update banned requester lists or PCN codes.

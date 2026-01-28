@@ -1,4 +1,4 @@
-PROCleans
+**PROCleans**
 
 📄 Overview
 **PROCleans** is a high-performance data auditing suite built with Streamlit. It automates the validation of procurement datasets by utilizing a **Hybrid Rule Engine**, combining hardcoded financial logic with dynamic, user-definable rules managed via Excel configuration files.
@@ -15,12 +15,11 @@ PROCleans
    - Microsoft Excel (to manage the configuration file)
 
 2. Install dependencies:
+
    Open your terminal/command prompt and run:
-     ---------------------------------------------------------------
-     | <> bash                                                    |
-     | ---------------------------------------------------------- |
-     | pip install streamlit pandas numpy xlsxwriter openpyxl     |
-     ---------------------------------------------------------------  
+      
+      ```bash
+         pip install streamlit pandas numpy xlsxwriter openpyxl
 
 3. Project Structure
    To ensure the app runs correctly, organize your folder like this: 

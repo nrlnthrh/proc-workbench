@@ -4,6 +4,7 @@ import numpy as np
 import io
 import re
 import xlsxwriter
+import gc
 
 # ==========================================
 # 1. PAGE CONFIGURATION - Layout
@@ -167,17 +168,45 @@ def load_smd_config(config_file):
                 key = col.strip()
                 # Store set of valid values
                 config['reference_lists'][key] = set(df_ref[col].dropna().astype(str).str.strip())
-
+        
+        # 5. Column Mapping Sheet
+        if 'Column_Mapping' in xls.sheet_names:
+            df_map = pd.read_excel(xls, 'Column_Mapping')
+            for _, row in df_map.iterrows():
+                std = str(row['Standard_Column']).strip()
+                # Split possible headers by comma
+                possibles = [x.strip() for x in str(row['Possible_Headers']).split(',')]
+                config['column_mapping'][std] = possibles
+                
     except Exception as e:
         st.error(f"Error reading SMD Config: {e}")
     return config
 
-def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
+def run_smd_analysis(df, config_file, target_cocd, target_porg):
     df_out = df.copy()
     df.columns = df.columns.str.strip()
 
     # --- Rules ---
     rules_data = load_smd_config(config_file)
+
+    # Header Standardization
+    col_map_config = rules_data.get('column_mapping', {})
+    current_cols_lower = {c.lower(): c for c in df_out.columns}
+    rename_map = {}
+
+    for std_col, possible_names in col_map_config.items():
+        if std_col in df_out.columns: continue
+        for alias in possible_names:
+            if alias.lower() in current_cols_lower:
+                rename_map[current_cols_lower[alias.lower()]] = std_col
+                break
+    
+    if rename_map:
+        df_out = df_out.rename(columns=rename_map)
+    
+    # Update df reference for processing
+    df = df_out
+
     field_rules = rules_data.get('field_rules', [])
     ref_lists = rules_data.get('reference_lists', {})
     postal_rules = rules_data.get('postal_codes', {})
@@ -196,24 +225,19 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
         rtype = str(rule.get('Rule')).strip().lower()
         cat = str(rule.get('Category', 'General')).strip()
         val = str(rule.get('Value', '')).strip()
-        rule_region = str(rule.get('Region', 'ALL')).strip().upper()
 
-        if rule_region == 'ALL' or rule_region == region.upper():
-            rule_obj = {'field': field, 'cat': cat, 'val': val}
-            if 'mandatory' in rtype: req_dict['Mandatory'].append(rule_obj)
-            elif 'empty' in rtype: req_dict['Empty'].append(rule_obj)
-            elif 'inlist' in rtype: req_dict['InList'].append(rule_obj)
-            elif 'contains' in rtype: req_dict['Contains'].append(rule_obj)
+        rule_obj = {'field': field, 'cat': cat, 'val': val}
+        if 'mandatory' in rtype: req_dict['Mandatory'].append(rule_obj)
+        elif 'empty' in rtype: req_dict['Empty'].append(rule_obj)
+        elif 'inlist' in rtype: req_dict['InList'].append(rule_obj)
+        elif 'contains' in rtype: req_dict['Contains'].append(rule_obj)
 
     # --- 2. HARDCODED LOGIC & COLUMN MAPPING ---
     valid_vendor_ids = set()
     if 'Vendor' in df.columns: valid_vendor_ids = set(df['Vendor'].astype(str).str.strip())
     
     col_payt_fin = 'PayT'
-    col_payt_purch = 'PayT.1' if 'PayT.1' in df.columns else 'PayT'
-    if region == 'EU':
-        col_payt_fin = 'PayT C.Co' if 'PayT C.Co' in df.columns else 'PayT'
-        col_payt_purch = 'PayT POrg' if 'PayT POrg' in df.columns else 'PayT'
+    col_payt_purch = 'PayT.1'
 
     all_error_details, p1_list_col, p2_list_col, p3_list_col, gen_list_col = [], [], [], [], []
 
@@ -384,11 +408,12 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
     df_out['Name 1'] = df_out.get('Name 1', 'N/A')
     df_out['Company Code'] = df_out.get('CoCd', 'N/A')
     
+    gc.collect()
     return df_out, bad_cells
 
 def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error_breakdown_df, bad_cells):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+    with pd.ExcelWriter(output, engine='xlsxwriter', engine_kwargs={'options': {'constant_memory': True}}) as writer:
         workbook = writer.book
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
@@ -620,11 +645,12 @@ def run_email_analysis(df):
     # cleanup temp column
     if 'ID Numeric' in df_out.columns: del df_out['ID Numeric']
 
+    gc.collect()
     return df_out
 
 def to_excel_email_download(df_result, metrics_dict):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+    with pd.ExcelWriter(output, engine='xlsxwriter', engine_kwargs={'options': {'constant_memory': True}}) as writer:
         workbook = writer.book
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
@@ -1048,6 +1074,7 @@ def run_po_analysis_dynamic(df, config_file):
     # Concate results to original DF 
     df_out = pd.concat([df_results, df], axis=1)
     
+    gc.collect()
     return df_out, bad_cells, category_list
 
 def to_excel_po_download(full_df, bad_cells, category_list):
@@ -1283,13 +1310,11 @@ def main():
         
         target_cocd = "3072"
         target_porg = "3072"
-        region_mode = "APAC"
         
         if task == "SMD Analysis":
             st.header("⚙️ Configuration")
-            region_mode = st.radio("Region:", ["APAC", "EU"], horizontal=True)
-            target_cocd = st.text_input("Target CoCd:", value="3072" if region_mode == "APAC" else "1040")
-            target_porg = st.text_input("Target POrg:", value="3072" if region_mode == "APAC" else "1040", help="Enter multiple POrgs separated by commas.")
+            target_cocd = st.text_input("Target CoCd:", placeholder="e.g., 3072")
+            target_porg = st.text_input("Target POrg:", placeholder="e.g., 3072,3050", help="Enter multiple POrgs separated by commas.")
 
     # ================================================
     # PAGE LOGIC
@@ -1312,7 +1337,7 @@ def main():
     # ____________________
 
     elif task == "SMD Analysis": 
-        st.title(f"SMD Validation ({region_mode})")
+        st.title(f"Supplier Master Data Analysis")
         
         st.subheader("1. Upload Rules Config")
         req_file = st.file_uploader("Upload 'SMD_Rules_Config.xlsx'", type=['xlsx'], key='smd_req')
@@ -1336,7 +1361,7 @@ def main():
                 else:
                     df = pd.concat(all_dfs, ignore_index=True)
 
-                    results, bad_cells = run_smd_analysis(df, req_file, target_cocd, target_porg, region_mode)
+                    results, bad_cells = run_smd_analysis(df, req_file, target_cocd, target_porg)
                     duplicates_df = get_duplicates_df(df)
                     
                     df_errors_only = results[results['Error Details'] != ""]

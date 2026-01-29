@@ -4,7 +4,6 @@ import numpy as np
 import io
 import re
 import xlsxwriter
-import gc
 
 # ==========================================
 # 1. PAGE CONFIGURATION - Layout
@@ -408,12 +407,11 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg):
     df_out['Name 1'] = df_out.get('Name 1', 'N/A')
     df_out['Company Code'] = df_out.get('CoCd', 'N/A')
     
-    gc.collect()
     return df_out, bad_cells
 
 def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error_breakdown_df, bad_cells):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter', engine_kwargs={'options': {'constant_memory': True}}) as writer:
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
@@ -645,12 +643,11 @@ def run_email_analysis(df):
     # cleanup temp column
     if 'ID Numeric' in df_out.columns: del df_out['ID Numeric']
 
-    gc.collect()
     return df_out
 
 def to_excel_email_download(df_result, metrics_dict):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter', engine_kwargs={'options': {'constant_memory': True}}) as writer:
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
@@ -1073,8 +1070,7 @@ def run_po_analysis_dynamic(df, config_file):
     df = df.reset_index(drop=True)
     # Concate results to original DF 
     df_out = pd.concat([df_results, df], axis=1)
-    
-    gc.collect()
+
     return df_out, bad_cells, category_list
 
 def to_excel_po_download(full_df, bad_cells, category_list):

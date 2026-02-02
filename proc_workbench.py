@@ -9,7 +9,7 @@ import xlsxwriter
 # 1. PAGE CONFIGURATION - Layout
 # ==========================================
 st.set_page_config(
-    page_title="Procurement Workbench",
+    page_title="PROCleans",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -22,6 +22,9 @@ st.markdown("""
     .metric-card { background-color: white; padding: 15px; border-radius: 10px; box-shadow: 2px 2px 10px rgba(0,0,0,0.1) }
     </style>
     """, unsafe_allow_html=True)
+
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 # ===========================================================
 # 2. HELPER FUNCTIONS - Mandatory functions for Analysis
@@ -46,6 +49,13 @@ def check_greater_than_zero(value):
     except:
         pass
     return False
+
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+# ==========================================
+# 3. SMD ANALYSIS LOGIC (Hybrid Engine)
+# ==========================================
 
 def check_postal_code(country, postal_code, rules_dict=None):
     if not check_mandatory(postal_code): return None
@@ -85,7 +95,7 @@ def get_duplicates_df(df):
             bad_syn_ids = counts[counts > 1].index.tolist()
             if bad_syn_ids:
                 s_dupes = df[df['__syn_clean'].isin(bad_syn_ids)].copy()
-                s_dupes['Duplicate_Reason'] = 'Synertrade ID used by multiple Vendors'
+                s_dupes['Duplicate Reason'] = 'Synertrade ID used by multiple Vendors'
                 dupes = pd.concat([dupes, s_dupes])
 
     # 2. Vendor ID Logic (Strict duplicates in file)
@@ -100,10 +110,6 @@ def get_primary_id(row):
     if check_mandatory(row.get('Vendor')): return str(row['Vendor'])
     if check_mandatory(row.get('Synertrade Supplier ID')): return str(row['Synertrade Supplier ID'])
     return "N/A"
-
-# ==========================================
-# 3. SMD ANALYSIS LOGIC (Hybrid Engine)
-# ==========================================
 
 def load_smd_config(config_file):
     config = {
@@ -161,17 +167,45 @@ def load_smd_config(config_file):
                 key = col.strip()
                 # Store set of valid values
                 config['reference_lists'][key] = set(df_ref[col].dropna().astype(str).str.strip())
-
+        
+        # 5. Column Mapping Sheet
+        if 'Column_Mapping' in xls.sheet_names:
+            df_map = pd.read_excel(xls, 'Column_Mapping')
+            for _, row in df_map.iterrows():
+                std = str(row['Standard_Column']).strip()
+                # Split possible headers by comma
+                possibles = [x.strip() for x in str(row['Possible_Headers']).split(',')]
+                config['column_mapping'][std] = possibles
+                
     except Exception as e:
         st.error(f"Error reading SMD Config: {e}")
     return config
 
-def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
+def run_smd_analysis(df, config_file, target_cocd, target_porg):
     df_out = df.copy()
     df.columns = df.columns.str.strip()
 
     # --- Rules ---
     rules_data = load_smd_config(config_file)
+
+    # Header Standardization
+    col_map_config = rules_data.get('column_mapping', {})
+    current_cols_lower = {c.lower(): c for c in df_out.columns}
+    rename_map = {}
+
+    for std_col, possible_names in col_map_config.items():
+        if std_col in df_out.columns: continue
+        for alias in possible_names:
+            if alias.lower() in current_cols_lower:
+                rename_map[current_cols_lower[alias.lower()]] = std_col
+                break
+    
+    if rename_map:
+        df_out = df_out.rename(columns=rename_map)
+    
+    # Update df reference for processing
+    df = df_out
+
     field_rules = rules_data.get('field_rules', [])
     ref_lists = rules_data.get('reference_lists', {})
     postal_rules = rules_data.get('postal_codes', {})
@@ -183,37 +217,33 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
         valid_porg_list = [p.strip() for p in str(target_porg).split(',') if p.strip()]
 
     # --- 1. DYNAMIC CONFIGURATION (Load Rules from Excel) ---
-    req_dict = {'Mandatory': [], 'Empty': [], 'InList': [], 'ContainsAny': []}
+    req_dict = {'Mandatory': [], 'Empty': [], 'InList': [], 'Contains': []}
     
     for rule in field_rules:
         field = str(rule.get('Field')).strip()
         rtype = str(rule.get('Rule')).strip().lower()
         cat = str(rule.get('Category', 'General')).strip()
         val = str(rule.get('Value', '')).strip()
-        rule_region = str(rule.get('Region', 'ALL')).strip().upper()
 
-        if rule_region == 'ALL' or rule_region == region.upper():
-            rule_obj = {'field': field, 'cat': cat, 'val': val}
-            if 'mandatory' in rtype: req_dict['Mandatory'].append(rule_obj)
-            elif 'empty' in rtype: req_dict['Empty'].append(rule_obj)
-            elif 'inlist' in rtype: req_dict['InList'].append(rule_obj)
-            elif 'containsany' in rtype: req_dict['ContainsAny'].append(rule_obj)
+        rule_obj = {'field': field, 'cat': cat, 'val': val}
+        if 'mandatory' in rtype: req_dict['Mandatory'].append(rule_obj)
+        elif 'empty' in rtype: req_dict['Empty'].append(rule_obj)
+        elif 'inlist' in rtype: req_dict['InList'].append(rule_obj)
+        elif 'contains' in rtype: req_dict['Contains'].append(rule_obj)
 
     # --- 2. HARDCODED LOGIC & COLUMN MAPPING ---
     valid_vendor_ids = set()
     if 'Vendor' in df.columns: valid_vendor_ids = set(df['Vendor'].astype(str).str.strip())
     
     col_payt_fin = 'PayT'
-    col_payt_purch = 'PayT.1' if 'PayT.1' in df.columns else 'PayT'
-    if region == 'EU':
-        col_payt_fin = 'PayT C.Co' if 'PayT C.Co' in df.columns else 'PayT'
-        col_payt_purch = 'PayT POrg' if 'PayT POrg' in df.columns else 'PayT'
+    col_payt_purch = 'PayT.1'
 
-    all_error_details, p1_list_col, p2_list_col, p3_list_col, gen_list_col, bad_cells = [], [], [], [], [], []
+    all_error_details, p1_list_col, p2_list_col, p3_list_col, gen_list_col = [], [], [], [], []
 
-    def log_err(category_list, msg, col_name=None, idx=None):
+    bad_cells = []
+    def log_err(category_list, msg, col_name, idx, specific_cat_name):
         category_list.append(msg)
-        if col_name and col_name in df.columns: bad_cells.append((idx, col_name))
+        if col_name and col_name in df.columns: bad_cells.append((idx, col_name, specific_cat_name))
 
     # --- 3. EXECUTION ---
     for index, row in df.iterrows():
@@ -224,18 +254,18 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
         # --- A. Apply Dynamic Rules (Excel) ---
         def get_target_list(cat_name):
             c = cat_name.lower()
-            if 'purchasing' in c: return p1
-            if 'org' in c or 'finance' in c: return p2
-            if 'master' in c or 'vendor' in c: return p3
-            return gen # default
+            if 'purchasing' in c: return p1, 'Purchasing'
+            if 'org' in c or 'finance' in c: return p2, 'Org Finance'
+            if 'master' in c or 'vendor' in c: return p3, 'Master Data'
+            return gen, 'General' # default
         
         for item in req_dict['Mandatory']:
-            target_list = get_target_list(item['cat'])
+            t_list, t_name = get_target_list(item['cat'])
             if item['field'] in df.columns and not check_mandatory(row[item['field']]):
-                log_err(target_list, f"{item['field']} is missing", item['field'], index)
+                log_err(t_list, f"{item['field']} is missing", item['field'], index, t_name)
         for item in req_dict['Empty']:
             if item['field'] in df.columns and not check_must_be_empty(row[item['field']]):
-                log_err(target_list, f"{item['field']} must be empty", item['field'], index)
+                log_err(t_list, f"{item['field']} must be empty", item['field'], index, t_name)
         
         # InList Check (Checks against Reference Lists)
         for item in req_dict['InList']:
@@ -247,30 +277,26 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
                     # Check if the list exists in our config
                     if ref_key in ref_lists:
                         if val not in ref_lists[ref_key]:
-                            log_err(get_target_list(item['cat']), f"{f_name} invalid (not in {ref_key})", f_name, index)
-                    else:
-                        # Optional: warn if list missing? skipping for now to avoid noise
-                        pass
+                            log_err(t_list, f"{f_name} invalid (not in {ref_key})", f_name, index, t_name)
         
-        # ContainsAny Check (e.g. N,Q,S)
-        for item in req_dict['ContainsAny']:
+        # Contains Check
+        for item in req_dict['Contains']:
             f_name = item['field']
             chars = [c.strip() for c in item['val'].split(',')]
             if f_name in df.columns:
                 val = str(row[f_name]).strip()
                 if check_mandatory(val) and not any(c in val for c in chars):
-                    log_err(get_target_list(item['cat']), f"{f_name} missing required value", f_name, index)
+                    log_err(t_list, f"{f_name} missing required value", f_name, index, t_name)
 
         # --- B. Hardcoded Business Logic (Things too complex for simple Excel rules) ---
-
         # 1. Currency (Check all variations)
         crcy_cols = [c for c in df.columns if 'crcy' in c.lower() or 'currency' in c.lower()]
         if crcy_cols:
             has_currency = any(check_mandatory(row[c]) for c in crcy_cols)
             if not has_currency:
-                log_err(p1, "Currency missing (All Cols)", crcy_cols[0], index)
+                log_err(p1, "Currency missing (All Cols)", crcy_cols[0], index, 'Purchasing')
 
-        if col_payt_purch in df.columns and not check_mandatory(row[col_payt_purch]): log_err(p1, "Purch PayT Missing", col_payt_purch, index)
+        if col_payt_purch in df.columns and not check_mandatory(row[col_payt_purch]): log_err(p1, "Purch PayT Missing", col_payt_purch, index, 'Purchasing')
         
         # 2. Incoterms
         if 'IncoT' in df.columns:
@@ -292,36 +318,36 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
                             # Check if ANY of the values exist in Inco 2
                             opts = [x.strip() for x in rval.split(',')]
                             if not any(opt in inco2 for opt in opts):
-                                log_err(p1, msg, 'Inco. 2', index)
+                                log_err(p1, msg, 'Inco. 2', index, 'Purchasing')
 
                         elif rtype == 'startswith':
                             # Check if Inco 2 starts with any option
                             opts = [x.strip() for x in rval.split(',')]
                             if not any(inco2.startswith(opt) for opt in opts):
-                                log_err(p1, msg, 'Inco. 2', index)
+                                log_err(p1, msg, 'Inco. 2', index, 'Purchasing')
 
                         elif rtype == 'equals' and rval == 'obsolete':
                             # Flag the IncoT itself
-                            log_err(p1, msg, 'IncoT', index)
+                            log_err(p1, msg, 'IncoT', index, 'Purchasing')
 
             else:
-                log_err(p1, "IncoT missing", 'IncoT', index)
+                log_err(p1, "IncoT missing", 'IncoT', index, 'Purchasing')
 
         # 3. Payment Terms
         if col_payt_fin in df.columns and col_payt_purch in df.columns:
             fin, pur = str(row[col_payt_fin]).strip(), str(row[col_payt_purch]).strip()
-            if fin != pur: log_err(p2, f"PayT Mismatch ({fin} vs {pur})", col_payt_fin, index)
+            if fin != pur: log_err(p2, f"PayT Mismatch ({fin} vs {pur})", col_payt_fin, index, 'Org Finance')
         
         # 4. Org Check
-        if 'CoCd' in df.columns and str(row['CoCd']).strip() != target_cocd: log_err(p2, f"CoCd != {target_cocd}", 'CoCd', index)
+        if 'CoCd' in df.columns and str(row['CoCd']).strip() != target_cocd: log_err(p2, f"CoCd != {target_cocd}", 'CoCd', index, 'Org Finance')
         if 'POrg' in df.columns:
             porg = str(row['POrg']).strip()
             if valid_porg_list:
                 if check_mandatory(porg):
                     if porg not in valid_porg_list: 
-                        log_err(p2, f"POrg != {valid_porg_list}", 'POrg', index)
+                        log_err(p2, f"POrg != {valid_porg_list}", 'POrg', index, 'Org Finance')
                 else:
-                    log_err(p2, "POrg is missing", 'POrg', index)
+                    log_err(p2, "POrg is missing", 'POrg', index, 'Org Finance')
 
         # 5. Tax Logic (At least 1 required)
         tax_candidates = [c for c in df.columns if ('tax' in c.lower() or 'vat' in c.lower()) 
@@ -330,18 +356,18 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
             has_tax = any(check_mandatory(row[c]) for c in tax_candidates)
             if not has_tax: 
                 gen.append("At least one Tax ID Required")
-                bad_cells.append((index, tax_candidates[0]))
+                bad_cells.append((index, tax_candidates[0], 'General'))
 
         # 6. Postal Code
         if 'Postl Code' in df.columns:
             postal_err = check_postal_code(country, row['Postl Code'], postal_rules)
-            if postal_err: log_err(gen, postal_err, 'Postl Code', index)
+            if postal_err: log_err(gen, postal_err, 'Postl Code', index, 'General')
 
         # 7. Duplicate Logic (Alt Payee Scope)
         if 'AltPayeeAc' in df.columns:
             alt = str(row['AltPayeeAc']).strip()
             if check_mandatory(alt) and alt not in valid_vendor_ids:
-                log_err(p3, "AltPayee Not in Scope", 'AltPayeeAc', index)
+                log_err(p3, "AltPayee Not in Scope", 'AltPayeeAc', index, 'Master Data')
         
         # 8. Telephone 1 logic
         if 'Telephone 1' in df.columns:
@@ -349,17 +375,17 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
 
             # Rule 1: Mandatory for Global
             if not check_mandatory(phone): 
-                log_err(gen, "Tel 1 missing", 'Telephone 1', index)
+                log_err(gen, "Tel 1 missing", 'Telephone 1', index, 'General')
             
             # Rule 2: "+" symbol only for CoCd 3072
             elif str(target_cocd).strip() == '3072' and "+" not in phone: 
-                log_err(gen, "Tel 1 missing '+'", 'Telephone 1', index)
+                log_err(gen, "Tel 1 missing '+'", 'Telephone 1', index, 'General')
                     
         # 9. Synertrade Supplier ID
         if 'Synertrade Supplier ID' in df.columns:
                 syn_id = str(row['Synertrade Supplier ID'])
                 if not check_mandatory(syn_id):
-                    log_err(p3, "Synertrade ID missing", 'Synertrade Supplier ID', index)
+                    log_err(p3, "Synertrade ID missing", 'Synertrade Supplier ID', index, 'Master Data')
 
         # Consolidate
         all_errs = p1 + p2 + p3 + gen
@@ -369,17 +395,17 @@ def run_smd_analysis(df, config_file, target_cocd, target_porg, region):
         p3_list_col.append(" | ".join(p3))
         gen_list_col.append(" | ".join(gen))
 
-    df_out.insert(0, 'General_Errors', gen_list_col)
-    df_out.insert(0, 'Master_Data_Issues', p3_list_col)
-    df_out.insert(0, 'Org_Finance_Issues', p2_list_col)
-    df_out.insert(0, 'Purchasing_Issues', p1_list_col)
-    df_out.insert(0, 'Error_Details', all_error_details)
+    df_out.insert(0, 'General Errors', gen_list_col)
+    df_out.insert(0, 'Master Data Issues', p3_list_col)
+    df_out.insert(0, 'Org Finance Issues', p2_list_col)
+    df_out.insert(0, 'Purchasing Issues', p1_list_col)
+    df_out.insert(0, 'Error Details', all_error_details)
     
-    df_out['Row_Index'] = df_out.index + 2
-    df_out['Primary_ID'] = df_out.apply(get_primary_id, axis=1)
-    df_out['Vendor_ID'] = df_out.get('Vendor', 'N/A')
-    df_out['Name_1'] = df_out.get('Name 1', 'N/A')
-    df_out['Company_Code'] = df_out.get('CoCd', 'N/A')
+    df_out['Row Index'] = df_out.index + 2
+    df_out['Primary ID'] = df_out.apply(get_primary_id, axis=1)
+    df_out['Vendor ID'] = df_out.get('Vendor', 'N/A')
+    df_out['Name 1'] = df_out.get('Name 1', 'N/A')
+    df_out['Company Code'] = df_out.get('CoCd', 'N/A')
     
     return df_out, bad_cells
 
@@ -390,9 +416,38 @@ def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error
         red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
         bold_format = workbook.add_format({'bold': True})
+        
+        # Helper for highlight
+        def write_with_highlight(dataframe, sheet_name, target_category='ALL', freeze_col=0):
+            dataframe.to_excel(writer, index=False, sheet_name=sheet_name)
+            ws = writer.sheets[sheet_name]
+
+            # Format headers
+            for i, col in enumerate(dataframe.columns):
+                ws.write(0, i, col, header_format)
+            
+            # Map columns
+            col_map = {name: i for i, name in enumerate(dataframe.columns)}
+
+            # Iterate rows and highlight errors
+            for excel_row_offset, original_idx in enumerate(dataframe.index):
+                excel_row = excel_row_offset + 1 
+
+                # check for columns present in specific sheet
+                for row_idx, col_name, cat in bad_cells:
+                    if row_idx == original_idx and col_name in col_map:
+
+                        if target_category == 'ALL' or target_category == cat:
+                            col_idx = col_map[col_name]
+                            val = dataframe.at[original_idx, col_name]
+
+                            if pd.isna(val): ws.write_blank(excel_row, col_idx, None, red_format)
+                            else: ws.write(excel_row, col_idx, val, red_format)
+            # Final formatting
+            ws.freeze_panes(1, freeze_col + 1)
 
         # --- Sheet 1: Dashboard ---
-        worksheet0 = workbook.add_worksheet('Dashboard_Summary')
+        worksheet0 = workbook.add_worksheet('Dashboard Summary')
         worksheet0.write('B2', "High Level Summary", header_format)
         worksheet0.write('C2', "Count", header_format)
         worksheet0.write('B3', "Total Records", bold_format)
@@ -409,8 +464,8 @@ def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error
         worksheet0.write('C9', "Count", header_format)
         categories = [
             ("Purchasing Info Issues", metrics_dict.get('Purchasing', 0)),
-            ("Org Structure & Finance Issues", metrics_dict.get('Org_Finance', 0)),
-            ("Master Data ID Issues", metrics_dict.get('Master_Data', 0)),
+            ("Org Structure & Finance Issues", metrics_dict.get('Org Finance', 0)),
+            ("Master Data ID Issues", metrics_dict.get('Master Data', 0)),
             ("General Issues", metrics_dict.get('General', 0))
         ]
         row_num = 9
@@ -429,110 +484,107 @@ def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error
                 worksheet0.write(start_row + i + 1, 2, row['Count'])
         worksheet0.set_column(1, 1, 60)
 
+        # Helper to clean the internal columns
+        cols_to_show = ['Purchasing Issues', 'Org Finance Issues', 'Master Data Issues', 'General Errors']
+        internal_cols = ['Row Index', 'Vendor ID', 'Primary ID', 'Company Code', 'Synertrade ID', 'Error Details']
+
+        def clean_df(df_subset, specific_error=None):
+            drop_list = [c for c in internal_cols if c in df_subset.columns]
+
+            # Drop other error if focus on specific error
+            if specific_error:
+                other_errs = [c for c in cols_to_show if c != specific_error]
+                drop_list.extend([c for c in other_errs if c in df_subset.columns])
+
+            clean_view = df_subset.drop(columns=drop_list)
+
+            # Move the specific error to the front
+            if specific_error and specific_error in clean_view.columns:
+                cols = [specific_error] + [c for c in clean_view.columns if c != specific_error]
+                clean_view = clean_view[cols]
+            return clean_view
+
         # --- Sheet 2: Error Rows Summary ---
         if not df_errors.empty: 
-            cols_to_keep = ['Row_Index', 'Primary_ID', 'Error_Details']
+            cols_to_keep = ['Row Index', 'Primary ID', 'Error Details']
             if 'Name 1' in df_errors.columns: cols_to_keep.insert(2, 'Name 1')
-            
-            clean_view = df_errors[cols_to_keep].copy()
-            clean_view.to_excel(writer, index=False, sheet_name='Error_Rows_Summary')
-            ws1 = writer.sheets['Error_Rows_Summary']
-            for i, col in enumerate(clean_view.columns): ws1.write(0, i, col, header_format)
+
+            summary_view = df_errors[cols_to_keep].copy()
+            summary_view.to_excel(writer, index=False, sheet_name='Error Summary')
+            ws1 = writer.sheets['Error Summary']
+            for i, col, in enumerate(summary_view.columns): ws1.write(0, i, col, header_format)
             ws1.set_column(0, 3, 25)
-            ws1.set_column(3, 3, 80)
-            ws1.freeze_panes(1, 2)
+            ws1.set_column(len(summary_view.columns)-1, len(summary_view.columns)-1, 80)
+            ws1.freeze_panes(1, 1)
         
         # --- Sheet 3: Full Raw Data ---
-        cols_to_drop = ['Row_Index', 'Vendor_ID', 'Primary_ID', 'Name_1', 'Company_Code', 'Synertrade_ID', 'Error_Details']
-        drop_list = [c for c in cols_to_drop if c in full_df.columns]
+        drop_list = [c for c in internal_cols if c in full_df.columns]
         raw_sheet_df = full_df.drop(columns=drop_list)
 
-        raw_sheet_df.to_excel(writer, index=False, sheet_name='Full_Raw_Data')
-        worksheet2 = writer.sheets['Full_Raw_Data']
-        for col_num, value in enumerate(raw_sheet_df.columns.values): 
-            worksheet2.write(0, col_num, value, header_format)
+        # reorder columns
+        existing_cols = [c for c in cols_to_show if c in raw_sheet_df.columns]
+        other_cols = [c for c in raw_sheet_df.columns if c not in existing_cols]
+        final_order = existing_cols + other_cols
+        raw_sheet_df = raw_sheet_df[final_order]
 
-        col_map = {name: i for i, name in enumerate(raw_sheet_df.columns)}
-        for row_idx, col_name in bad_cells:
-            if col_name in col_map:
-                excel_col_idx = col_map[col_name]
-                excel_row_idx = row_idx + 1
-                try:
-                    cell_value = raw_sheet_df.iat[row_idx, excel_col_idx]
-                    if pd.isna(cell_value):
-                        worksheet2.write_blank(excel_row_idx, excel_col_idx, None, red_format)
-                    else:
-                        worksheet2.write(excel_row_idx, excel_col_idx, cell_value, red_format)
-                except IndexError: pass
-        worksheet2.freeze_panes(1, 4) 
+        write_with_highlight(raw_sheet_df, 'Full Raw Data', target_category='ALL', freeze_col=3)
 
         # --- Priority Tabs ---
         priority_config = [
-            ('Purchasing_Issues', 'Purchasing_Validation'),
-            ('Org_Finance_Issues', 'Org_Finance_Validation'),
-            ('Master_Data_Issues', 'Master_Data_Validation')
+            ('Purchasing Issues', 'Purchasing Validation', 'Purchasing'),
+            ('Org Finance Issues', 'Org Finance Validation', 'Org Finance'),
+            ('Master Data Issues', 'Master Data Validation', 'Master Data')
         ]
-        disp_cols = ['Row_Index', 'Primary_ID', 'Name_1', 'Company_Code']
 
-        for col_name, sheet_name in priority_config:
+        for col_name, sheet_name, cat_key in priority_config:
             subset = full_df[full_df[col_name] != ""]
             if not subset.empty:
-                valid_disp = [c for c in disp_cols if c in full_df.columns]
-                final_cols = valid_disp + [col_name]
-                subset[final_cols].to_excel(writer, index=False, sheet_name=sheet_name)
-
-                # apply header format 
-                ws = writer.sheets[sheet_name]
-                for i, col in enumerate(final_cols):
-                    ws.write(0, i, col, header_format)
-                ws.set_column(0, len(final_cols)-1, 25) 
+                final_view = clean_df(subset, col_name)
+                write_with_highlight(final_view, sheet_name, target_category=cat_key, freeze_col=0) 
 
         # --- General Split Tabs ---
-        gen_tabs = [
-            ('missing|Required', 'Gen_Mandatory_Missing'),
-            ('must be empty', 'Gen_Should_Be_Empty')
-        ]
-
-        if 'General_Errors' in full_df.columns:
-            valid_disp = [c for c in disp_cols if c in full_df.columns]
-            final_cols = valid_disp + ['General_Errors']
-
-            # Mandatory & empty
-            for keyword, sheet_name in gen_tabs:
-                mask = full_df['General_Errors'].str.contains(keyword, case=False, na=False)
-                sub_df = full_df[mask]
-                if not sub_df.empty: 
-                    sub_df[final_cols].to_excel(writer, index=False, sheet_name=sheet_name)
-                    ws = writer.sheets[sheet_name]
-                    for i, col in enumerate(final_cols): ws.write(0, i, col, header_format)
-                    ws.set_column(0, len(final_cols)-1, 25)
+        if 'General Errors' in full_df.columns:
+            # Mandatory
+            mand_mask = full_df['General Errors'].str.contains("missing|Required", case=False, na=False)
+            mand_df = full_df[mand_mask]
+            if not mand_df.empty:
+                final_view = clean_df(mand_df, 'General Errors')
+                write_with_highlight(final_view, 'Gen Mandatory Missing', target_category='General', freeze_col=0)
+            
+            # Empty
+            empty_mask = full_df['General Errors'].str.contains("must be empty", case=False, na=False)
+            emp_df = full_df[empty_mask]
+            if not emp_df.empty:
+                final_view = clean_df(emp_df, 'General Errors')
+                write_with_highlight(final_view, 'Gen Should Be Empty', target_category='General', freeze_col=0)
 
             # Formatting             
-            fmt_mask = (full_df['General_Errors'] != "") & \
-            (~full_df['General_Errors'].str.contains("missing|Required", case=False, na=False)) & \
-            (~full_df['General_Errors'].str.contains("must be empty", case=False, na=False))
+            fmt_mask = (full_df['General Errors'] != "") & \
+            (~full_df['General Errors'].str.contains("missing|Required", case=False, na=False)) & \
+            (~full_df['General Errors'].str.contains("must be empty", case=False, na=False))
 
             fmt_df = full_df[fmt_mask]
             if not fmt_df.empty:
-                fmt_df[final_cols].to_excel(writer, index=False, sheet_name='Gen_Formatting_Logic')
-                ws = writer.sheets['Gen_Formatting_Logic']
-                for i, col in enumerate(final_cols): ws.write(0, i, col, header_format)
-                ws.set_column(0, len(final_cols)-1, 25)
+                final_view = clean_df(fmt_df, 'General Errors')
+                write_with_highlight(final_view, 'Gen Formatting Logic', target_category='General', freeze_col=0)
 
         # --- Duplicates ---
         if not duplicates_df.empty:
-            priority_cols = ['Duplicate_Reason', 'Vendor', 'Name 1', 'Synertrade Supplier ID']
+            priority_cols = ['Duplicate Reason', 'Vendor', 'Name 1', 'Synertrade Supplier ID']
             existing_cols = duplicates_df.columns.tolist()
             new_order = [c for c in priority_cols if c in existing_cols] + [c for c in existing_cols if c not in priority_cols]
             duplicates_df = duplicates_df[new_order]
 
-            duplicates_df.to_excel(writer, index=False, sheet_name='Potential_Duplicates')
-            ws_dupe = writer.sheets['Potential_Duplicates']
+            duplicates_df.to_excel(writer, index=False, sheet_name='Potential Duplicates')
+            ws_dupe = writer.sheets['Potential Duplicates']
             for i, col in enumerate(duplicates_df.columns): ws_dupe.write(0, i, col, header_format)
             ws_dupe.freeze_panes(1, 4)
             ws_dupe.set_column(0, 0, 30)
 
     return output.getvalue()
+
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 # ==========================================
 # 4. EMAIL ANALYSIS & MAIN UI
@@ -637,6 +689,9 @@ def to_excel_email_download(df_result, metrics_dict):
         ws2.set_column(0, 0, 50)
 
     return output.getvalue()
+
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 # ==========================================
 # 5. PO ANALYSIS LOGIC 
@@ -1015,7 +1070,7 @@ def run_po_analysis_dynamic(df, config_file):
     df = df.reset_index(drop=True)
     # Concate results to original DF 
     df_out = pd.concat([df_results, df], axis=1)
-    
+
     return df_out, bad_cells, category_list
 
 def to_excel_po_download(full_df, bad_cells, category_list):
@@ -1032,7 +1087,6 @@ def to_excel_po_download(full_df, bad_cells, category_list):
     with pd.ExcelWriter(output, engine='xlsxwriter', engine_kwargs=writer_options) as writer: 
         workbook = writer.book
         
-        red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         direct_po_format = workbook.add_format({'bg_color': "#D4D436", 'font_color': "#000000"})
         header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
         bold_format = workbook.add_format({'bold': True})
@@ -1220,6 +1274,8 @@ def to_excel_po_download(full_df, bad_cells, category_list):
 
     return output.getvalue()
 
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 # =================================
 # USER INTERFACE - Web Display
@@ -1227,8 +1283,8 @@ def to_excel_po_download(full_df, bad_cells, category_list):
 
 def main(): 
     with st.sidebar:
-        st.title("🛡️ Workbench")
-        st.write("v9.0 - Hybrid Rule Engine")
+        st.title("🛡️ PROCleans")
+        st.write("Hybrid Rule Engine")
         st.markdown("---")
 
         # --- 1. Module Switches ---
@@ -1250,20 +1306,18 @@ def main():
         
         target_cocd = "3072"
         target_porg = "3072"
-        region_mode = "APAC"
         
         if task == "SMD Analysis":
             st.header("⚙️ Configuration")
-            region_mode = st.radio("Region:", ["APAC", "EU"], horizontal=True)
-            target_cocd = st.text_input("Target CoCd:", value="3072" if region_mode == "APAC" else "1040")
-            target_porg = st.text_input("Target POrg:", value="3072" if region_mode == "APAC" else "1040", help="Enter multiple POrgs separated by commas.")
+            target_cocd = st.text_input("Target CoCd:", placeholder="e.g., 3072")
+            target_porg = st.text_input("Target POrg:", placeholder="e.g., 3072,3050", help="Enter multiple POrgs separated by commas.")
 
     # ================================================
     # PAGE LOGIC
     # ================================================
 
     if task == "Home":
-        st.title("Procurement Workbench")
+        st.title("PROCleans")
         st.markdown("""
                     Welcome!
                     Use the sidebar to enable or disable specific analysis modules.
@@ -1274,9 +1328,12 @@ def main():
                     - PO Analysis: Analyze Purchase Orders using a dynamic logic matrix.""")
         st.info("Open the sidebar to get started.")
 
+    # ==============================================================================================================
     # --- SMD ANALYSIS ---
+    # ____________________
+
     elif task == "SMD Analysis": 
-        st.title(f"SMD Validation ({region_mode})")
+        st.title(f"Supplier Master Data Analysis")
         
         st.subheader("1. Upload Rules Config")
         req_file = st.file_uploader("Upload 'SMD_Rules_Config.xlsx'", type=['xlsx'], key='smd_req')
@@ -1300,33 +1357,37 @@ def main():
                 else:
                     df = pd.concat(all_dfs, ignore_index=True)
 
-                    results, bad_cells = run_smd_analysis(df, req_file, target_cocd, target_porg, region_mode)
+                    results, bad_cells = run_smd_analysis(df, req_file, target_cocd, target_porg)
                     duplicates_df = get_duplicates_df(df)
                     
-                    df_errors_only = results[results['Error_Details'] != ""]
+                    df_errors_only = results[results['Error Details'] != ""]
 
-                    p1 = len(results[results['Purchasing_Issues'] != ""])
-                    p2 = len(results[results['Org_Finance_Issues'] != ""])
-                    p3 = len(results[results['Master_Data_Issues'] != ""])
-                    gen = len(results[results['General_Errors'] != ""])
+                    p1 = len(results[results['Purchasing Issues'] != ""])
+                    p2 = len(results[results['Org Finance Issues'] != ""])
+                    p3 = len(results[results['Master Data Issues'] != ""])
+                    gen = len(results[results['General Errors'] != ""])
                 
                     metrics = {
                         'Total': len(results), 'Correct': len(results) - len(df_errors_only), 'Errors': len(df_errors_only),
                         'Duplicates': len(duplicates_df),
-                        'Purchasing': p1, 'Org_Finance': p2, 'Master_Data': p3, 'General': gen
+                        'Purchasing': p1, 'Org Finance': p2, 'Master Data': p3, 'General': gen
                     }
                 
                     error_bkdown = pd.DataFrame()
                     if not df_errors_only.empty:
-                        error_bkdown = df_errors_only['Error_Details'].str.split(' \| ').explode().value_counts().reset_index()
+                        error_bkdown = df_errors_only['Error Details'].str.split(' \| ').explode().value_counts().reset_index()
                         error_bkdown.columns = ['Error Description', 'Count']
 
                     st.metric("Total Errors", len(df_errors_only))
                     fname = f"SMD_Report_{target_cocd}.xlsx"
                     data = to_excel_download_smd(results, df_errors_only, duplicates_df, metrics, error_bkdown, bad_cells)
                     st.download_button("Download Report", data, fname)
+    # ==============================================================================================================
 
+    # ==============================================================================================================
     # --- PO ANALYSIS ----
+    # _____________________
+
     elif task == "PO Analysis": 
         st.title("Purchase Order Analysis")
 
@@ -1361,8 +1422,12 @@ def main():
 
                     data = to_excel_po_download(res_po, bad_cells, cat_list)
                     st.download_button("Download PO Report", data, "PO_Analysis_Report.xlsx")
-    
+    # ==============================================================================================================
+
+    # ==============================================================================================================
     # --- EMAIL ---
+    # ________________
+
     elif task == "Email Validation": 
         st.title("Vendor Email Validation")
         uploaded_email = st.file_uploader("Upload Email List", type=['xlsx'])
@@ -1403,6 +1468,7 @@ def main():
                         data = to_excel_email_download(res_email, metrics_dict)
                         st.download_button("Download Email Report", data, "Email_Validation.xlsx")
                     else: st.success("Valid!")
+    # ==============================================================================================================
 
 if __name__ == "__main__":
     main()

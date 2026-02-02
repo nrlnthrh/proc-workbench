@@ -3,6 +3,9 @@ stages:
 
 build_to_harbor:
   stage: build
+  tags:
+    - docker
+    - shared
   image:
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]

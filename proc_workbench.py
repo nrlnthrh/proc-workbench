@@ -621,7 +621,7 @@ def run_email_analysis(df):
 
         # check if row is marked (X or 1)
         flag = str(row['#']).strip().upper()
-        is_marked = (flag == 'X' or flag == '1')
+        is_marked = (flag == 'X')
 
         # Scenario: if it is the smallest ID, but not marked
         if current_id == min_id:

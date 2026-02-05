@@ -1281,65 +1281,84 @@ def to_excel_po_download(full_df, bad_cells, category_list):
 # USER INTERFACE - Web Display
 # =================================
 
-def main(): 
+def main():
+    # Session state setup
+    if 'smd_on' not in st.session_state: st.session_state.smd_on = False
+    if 'po_on' not in st.session_state: st.session_state.po_on = False
+    if 'email_on' not in st.session_state: st.session_state.email_on = False
+
+    # Callbacks
+    def toggle_smd():
+        if st.session_state.smd_on:
+            st.session_state.po_on = False
+            st.session_state.email_on = False
+
+    def toggle_po():
+        if st.session_state.po_on:
+            st.session_state.smd_on = False
+            st.session_state.email_on = False
+
+    def toggle_email():
+        if st.session_state.email_on:
+            st.session_state.smd_on = False
+            st.session_state.po_on = False
+
     with st.sidebar:
         st.title("🛡️ PROCleans")
-        st.write("Hybrid Rule Engine")
+        st.caption("Hybrid Rule Engine")
         st.markdown("---")
 
-        # --- 1. Module Switches ---
-        with st.expander("Enable/Disable Modules", expanded=True):
-            show_smd = st.toggle("SMD Analysis", value=True)
-            show_email = st.toggle("Email Validation", value=True)
-            show_po = st.toggle("PO Analysis", value=True)
+        # --- 1. Navigation ---
+        st.subheader("Select Modules")
 
-        # --- 2. Dynamic Navigation ---
-        # Build the menu list based on switches
-        available_pages = ["Home"]
-        if show_smd: available_pages.append("SMD Analysis")
-        if show_email: available_pages.append("Email Validation")
-        if show_po: available_pages.append("PO Analysis")
+        # Switch button to on/off modules
+        show_smd = st.toggle("SMD Analysis", key="smd_on", on_change=toggle_smd)
+        show_po = st.toggle("PO Analysis", key="po_on", on_change=toggle_po)
+        show_email = st.toggle("Email Validation", key="email_on", on_change=toggle_email)
 
-        st.markdown("Navigation")
-        task = st.radio("Go to:", available_pages)
         st.markdown("---")
-        
-        target_cocd = "3072"
-        target_porg = "3072"
-        
-        if task == "SMD Analysis":
-            st.header("⚙️ Configuration")
-            target_cocd = st.text_input("Target CoCd:", placeholder="e.g., 3072")
-            target_porg = st.text_input("Target POrg:", placeholder="e.g., 3072,3050", help="Enter multiple POrgs separated by commas.")
 
+        if show_smd:
+            st.header("Configuration")
+            target_cocd = st.text_input("Company Code:", placeholder="e.g., 3072")
+            target_porg = st.text_input("Purchase Organization:", placeholder="e.g., 3072, 3050", help="Enter multiple Purchase Organizations separated by commas.")
+        
     # ================================================
     # PAGE LOGIC
     # ================================================
 
-    if task == "Home":
+    tabs_to_show = []
+    if show_smd: tabs_to_show.append("SMD Analysis")
+    if show_po: tabs_to_show.append("PO Analysis")
+    if show_email: tabs_to_show.append("Email Validation")
+
+    if not tabs_to_show:
         st.title("PROCleans")
         st.markdown("""
-                    Welcome!
-                    Use the sidebar to enable or disable specific analysis modules.
-                    
-                    Available Modules:
-                    - SMD Analysis: Validate Supplier Master Data against global and regional rules.
-                    - Email Validation: Check vendor email lists for missing contacts or format errors. 
-                    - PO Analysis: Analyze Purchase Orders using a dynamic logic matrix.""")
-        st.info("Open the sidebar to get started.")
+                    <div style='background-color: #e6f3ff; padding: 20px; border-radius: 10px; border-left: 5px solid #005eb8;'>
+                        <h3>Welcome!
+                            Use the sidebar to enable or disable specific analysis modules.</h3>
+                        <h4>Available Modules:</h4>
+                        <p>- SMD Analysis: Validate Supplier Master Data against global and regional rules.</p>
+                        <p>- PO Analysis: Analyze Purchase Orders using a dynamic logic matrix.</p>
+                        <p>- Email Validation: Check vendor email lists for missing contacts or format errors.</p>
+                    </div>
+        """, unsafe_allow_html=True)
+        return
 
     # ==============================================================================================================
     # --- SMD ANALYSIS ---
     # ____________________
 
-    elif task == "SMD Analysis": 
-        st.title(f"Supplier Master Data Analysis")
-        
-        st.subheader("1. Upload Rules Config")
-        req_file = st.file_uploader("Upload 'SMD_Rules_Config.xlsx'", type=['xlsx'], key='smd_req')
+    elif show_smd:
+        st.title("Supplier Master Data Analysis")
 
-        st.subheader("2. Upload Raw Data")
-        uploaded_file = st.file_uploader("Upload Raw Data", type=['xlsx'], key='smd_raw')
+        with st.container(border=True):
+            st.subheader("1. Upload Rules Config")
+            req_file = st.file_uploader("Upload 'SMD_Rules_Config.xlsx'", type=['xlsx'], key='smd_req')
+
+            st.subheader("2. Upload Raw Data")
+            uploaded_file = st.file_uploader("Upload Raw Data", type=['xlsx'], key='smd_raw')
 
         if uploaded_file and st.button("Run Analysis", type="primary"):
             with st.spinner(f"Analyzing..."):
@@ -1388,26 +1407,27 @@ def main():
     # --- PO ANALYSIS ----
     # _____________________
 
-    elif task == "PO Analysis": 
+    elif show_po:
         st.title("Purchase Order Analysis")
 
-        st.subheader("1. Upload PO Rules")
-        po_rules_file = st.file_uploader("Upload 'PO_Rules_Config.xlsx'", type=['xlsx'], key='po_rules')
+        with st.container(border=True):
+            st.subheader("1. Upload PO Rules")
+            po_rules_file = st.file_uploader("Upload 'PO_Rules_Config.xlsx'", type=['xlsx'], key='po_rules')
 
-        st.subheader("2. Upload PO Data")
-        po_raw_file = st.file_uploader("Upload Raw PO Data", type=['xlsx'], key='po_raw')
+            st.subheader("2. Upload PO Data")
+            po_raw_file = st.file_uploader("Upload Raw PO Data", type=['xlsx'], key='po_raw')
 
-        if po_rules_file and po_raw_file: 
-            if st.button("Run PO Check", type="primary"):
-                with st.spinner("Analyzing..."):
-                    xls = pd.ExcelFile(po_raw_file)
-                    all_dfs = []
+            if po_rules_file and po_raw_file: 
+                if st.button("Run PO Check", type="primary"):
+                    with st.spinner("Analyzing..."):
+                        xls = pd.ExcelFile(po_raw_file)
+                        all_dfs = []
                     for sheet_name in xls.sheet_names:
                         try: 
                             sheet_df = pd.read_excel(po_raw_file, sheet_name=sheet_name, keep_default_na=False, na_values=None)
                             all_dfs.append(sheet_df)
                         except: pass
-                    
+                   
                     if not all_dfs:
                         st.error("No data found in PO file.")
                         st.stop()
@@ -1428,9 +1448,11 @@ def main():
     # --- EMAIL ---
     # ________________
 
-    elif task == "Email Validation": 
+    elif show_email:
         st.title("Vendor Email Validation")
-        uploaded_email = st.file_uploader("Upload Email List", type=['xlsx'])
+
+        with st.container(border=True):
+            uploaded_email = st.file_uploader("Upload Email List", type=['xlsx'])
 
         if uploaded_email:
             if st.button("Run Email Check", type="primary"):
@@ -1468,6 +1490,7 @@ def main():
                         data = to_excel_email_download(res_email, metrics_dict)
                         st.download_button("Download Email Report", data, "Email_Validation.xlsx")
                     else: st.success("Valid!")
+                    
     # ==============================================================================================================
 
 if __name__ == "__main__":

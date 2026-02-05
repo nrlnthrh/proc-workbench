@@ -1417,31 +1417,31 @@ def main():
             st.subheader("2. Upload PO Data")
             po_raw_file = st.file_uploader("Upload Raw PO Data", type=['xlsx'], key='po_raw')
 
-            if po_rules_file and po_raw_file: 
-                if st.button("Run PO Check", type="primary"):
-                    with st.spinner("Analyzing..."):
-                        xls = pd.ExcelFile(po_raw_file)
-                        all_dfs = []
-                    for sheet_name in xls.sheet_names:
-                        try: 
-                            sheet_df = pd.read_excel(po_raw_file, sheet_name=sheet_name, keep_default_na=False, na_values=None)
-                            all_dfs.append(sheet_df)
-                        except: pass
+        if po_rules_file and po_raw_file: 
+            if st.button("Run PO Check", type="primary"):
+                with st.spinner("Analyzing..."):
+                    xls = pd.ExcelFile(po_raw_file)
+                    all_dfs = []
+                for sheet_name in xls.sheet_names:
+                    try: 
+                        sheet_df = pd.read_excel(po_raw_file, sheet_name=sheet_name, keep_default_na=False, na_values=None)
+                        all_dfs.append(sheet_df)
+                    except: pass
                    
-                    if not all_dfs:
-                        st.error("No data found in PO file.")
-                        st.stop()
+                if not all_dfs:
+                    st.error("No data found in PO file.")
+                    st.stop()
 
-                    df_po = pd.concat(all_dfs, ignore_index=True)
+                df_po = pd.concat(all_dfs, ignore_index=True)
 
-                    # Run dynamic PO engine
-                    res_po, bad_cells, cat_list = run_po_analysis_dynamic(df_po, po_rules_file)
+                # Run dynamic PO engine
+                res_po, bad_cells, cat_list = run_po_analysis_dynamic(df_po, po_rules_file)
 
-                    err_count = len(res_po[res_po['Error_Details'] != ""])
-                    st.metric("PO Lines with Errors", err_count)
+                err_count = len(res_po[res_po['Error_Details'] != ""])
+                st.metric("PO Lines with Errors", err_count)
 
-                    data = to_excel_po_download(res_po, bad_cells, cat_list)
-                    st.download_button("Download PO Report", data, "PO_Analysis_Report.xlsx")
+                data = to_excel_po_download(res_po, bad_cells, cat_list)
+                st.download_button("Download PO Report", data, "PO_Analysis_Report.xlsx")
     # ==============================================================================================================
 
     # ==============================================================================================================

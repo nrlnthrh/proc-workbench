@@ -4,17 +4,22 @@ stages:
 build_to_harbor:
   stage: build
   tags:
+    - linux    
     - docker
-    - shared
   image:
-    name: gcr.io/kaniko-project/executor:debug
+    # Use the Infineon Artifactory mirror instead of gcr.io
+    name: artifactory.infineon.com/docker-remote/kaniko-project/executor:debug
     entrypoint: [""]
+  variables:
+    # Tell Kaniko to use the Infineon Proxy to reach Harbor
+    http_proxy: http://proxy.infineon.com:8080
+    https_proxy: http://proxy.infineon.com:8080
   script:
-    # This sends your app to Infineon's Harbor Registry
-    # Replace 'rafeli' with your Short ID if it's different
     - /kaniko/executor
       --context "${CI_PROJECT_DIR}"
       --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
       --destination "harbor.infineon.com/rafeli/procurement-workbench:latest"
+      --build-arg http_proxy=$http_proxy
+      --build-arg https_proxy=$https_proxy
   only:
     - main

@@ -17,5 +17,5 @@ COPY . .
 # Expose the port HICP expects
 EXPOSE 8080
 
-# Start Streamlit directly
-ENTRYPOINT ["streamlit", "run", "proc_workbench.py", "--server.port=8080", "--server.address=0.0.0.0"]
+# Start launcher
+ENTRYPOINT ["python", "app.py"]

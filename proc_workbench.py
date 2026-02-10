@@ -587,114 +587,7 @@ def to_excel_download_smd(full_df, df_errors, duplicates_df, metrics_dict, error
 # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 # ==========================================
-# 4. EMAIL ANALYSIS & MAIN UI
-# ==========================================
-
-def run_email_analysis(df):
-    df.columns = df.columns.str.strip()
-    req_cols = ['Vendor', 'Communication link notes', 'ID', '#']
-    missing = [c for c in req_cols if c not in df.columns]
-    if missing:
-        st.error(f"Missing columns: {missing}")
-        return pd.DataFrame()
-    df_out = df.copy()
-
-    # convert "ID" to numbers, turn errors into NaN, fill NaN with a huge number so they are not "min"
-    df_out['ID Numeric'] = pd.to_numeric(df_out['ID'], errors='coerce').fillna(9999999)
-
-    vendor_groups = df_out.groupby('Vendor')
-    email_errors = []
-
-    for idx, row in df_out.iterrows():
-        errs = []
-        vendor = row['Vendor']
-        vendor_data = vendor_groups.get_group(vendor)
-
-        # Notes check
-        notes = str(row['Communication link notes']).strip()
-        if not check_mandatory(notes): errs.append("Comm. Notes Empty")
-
-        # Smallest ID logic 
-        # find the mathematical minimum ID
-        min_id = vendor_data['ID Numeric'].min()
-        current_id = row['ID Numeric']
-
-        # check if row is marked (X or 1)
-        flag = str(row['#']).strip().upper()
-        is_marked = (flag == 'X')
-
-        # Scenario: if it is the smallest ID, but not marked
-        if current_id == min_id:
-            if not is_marked: 
-                errs.append("Smallest ID not marked Default (#)")
-
-        elif current_id != min_id:
-            if is_marked: 
-                errs.append("Non-smallest ID marked as Default")
-                
-        email_errors.append(" | ".join(errs))
-
-    final_error_col = []
-    for idx, row in df_out.iterrows():
-        final_error_col.append(email_errors[idx])
-
-    df_out.insert(0, 'Email_Validation_Errors', final_error_col)
-
-    # cleanup temp column
-    if 'ID Numeric' in df_out.columns: del df_out['ID Numeric']
-
-    return df_out
-
-def to_excel_email_download(df_result, metrics_dict):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        workbook = writer.book
-        red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
-        header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
-        bold_format = workbook.add_format({'bold': True})
-        
-        # Dashboard summary 
-        ws0 = workbook.add_worksheet('Dashboard Summary')
-
-        # High level metrics
-        ws0.write('B2', "Email Validation Summary", header_format)
-        ws0.write('C2', "Count", header_format)
-        ws0.write('B3', "Total Records", bold_format)
-        ws0.write('C3', metrics_dict['Total'])
-        ws0.write('B4', "Correct Records", bold_format)
-        ws0.write('C4', metrics_dict['Correct'])
-        ws0.write('B5', "Records with Issues", bold_format)
-        ws0.write('C5', metrics_dict['Errors'])
-
-        ws0.set_column(1, 2, 25)
-
-        # Error Summary
-        df_err = df_result[df_result['Email_Validation_Errors'] != ""]
-        if not df_err.empty:
-            df_err.to_excel(writer, index=False, sheet_name='Error_Summary')
-            ws1 = writer.sheets['Error_Summary']
-            for i, col in enumerate(df_err.columns): ws1.write(0, i, col, header_format)
-            ws1.set_column(0, 0, 50)
-            ws1.set_column(1, len(df_err.columns)-1, 15)
-        
-        # Full email data
-        df_result.to_excel(writer, index=False, sheet_name='Full_Email_Data')
-        ws2 = writer.sheets['Full_Email_Data']
-        (max_row, max_col) = df_result.shape
-
-        for i, col in enumerate(df_result.columns): ws2.write(0, i, col, header_format)
-
-        # conditional formatting applied
-        ws2.conditional_format(1, 0, max_row, max_col - 1, {'type': 'formula', 'criteria': '=$A2<>""', 'format': red_format})
-        ws2.set_column(0, 0, 50)
-
-    return output.getvalue()
-
-# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-# ==========================================
-# 5. PO ANALYSIS LOGIC 
+# 4. PO ANALYSIS LOGIC 
 # ==========================================
 
 def load_po_config(config_file):
@@ -898,7 +791,7 @@ def run_po_analysis_dynamic(df, config_file):
         ir_clean = ir_exist_raw.replace('.', '').replace(' ', '')
 
         # PO Category Determination
-        p_cat = "Direct PO" if mat_val != "" else ("Material PO" if gr_val == 'X' else "Service PO")
+        p_cat = "Direct PO" if mat_val != "" else ("Indirect Material PO" if gr_val == 'X' else "Indirect Service PO")
         p_stat, p_rem, rule_found = "Review", "No matching logic found", False
 
         if p_cat == "Direct PO":
@@ -906,7 +799,7 @@ def run_po_analysis_dynamic(df, config_file):
             p_rem = "No further action needed."
             rule_found = True
         else:
-            p_cat = "Material PO" if gr_val == 'X' else "Service PO"
+            p_cat = "Indirect Material PO" if gr_val == 'X' else "Indirect Service PO"
         
         # Matrix Logic (Simplified evaluation)
         for rule in matrix:
@@ -1271,6 +1164,113 @@ def to_excel_po_download(full_df, bad_cells, category_list):
                     ws_stat.ignore_errors({'number_stored_as_text': 'A1:XFD1048576'})
                     ws_stat.set_column(0, len(stat_df.columns)-1, 18)
                     ws_stat.freeze_panes(1, 3)
+
+    return output.getvalue()
+
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+# ==========================================
+# 5. EMAIL ANALYSIS
+# ==========================================
+
+def run_email_analysis(df):
+    df.columns = df.columns.str.strip()
+    req_cols = ['Vendor', 'Communication link notes', 'ID', '#']
+    missing = [c for c in req_cols if c not in df.columns]
+    if missing:
+        st.error(f"Missing columns: {missing}")
+        return pd.DataFrame()
+    df_out = df.copy()
+
+    # convert "ID" to numbers, turn errors into NaN, fill NaN with a huge number so they are not "min"
+    df_out['ID Numeric'] = pd.to_numeric(df_out['ID'], errors='coerce').fillna(9999999)
+
+    vendor_groups = df_out.groupby('Vendor')
+    email_errors = []
+
+    for idx, row in df_out.iterrows():
+        errs = []
+        vendor = row['Vendor']
+        vendor_data = vendor_groups.get_group(vendor)
+
+        # Notes check
+        notes = str(row['Communication link notes']).strip()
+        if not check_mandatory(notes): errs.append("Comm. Notes Empty")
+
+        # Smallest ID logic 
+        # find the mathematical minimum ID
+        min_id = vendor_data['ID Numeric'].min()
+        current_id = row['ID Numeric']
+
+        # check if row is marked (X or 1)
+        flag = str(row['#']).strip().upper()
+        is_marked = (flag == 'X')
+
+        # Scenario: if it is the smallest ID, but not marked
+        if current_id == min_id:
+            if not is_marked: 
+                errs.append("Smallest ID not marked Default (#)")
+
+        elif current_id != min_id:
+            if is_marked: 
+                errs.append("Non-smallest ID marked as Default")
+                
+        email_errors.append(" | ".join(errs))
+
+    final_error_col = []
+    for idx, row in df_out.iterrows():
+        final_error_col.append(email_errors[idx])
+
+    df_out.insert(0, 'Email_Validation_Errors', final_error_col)
+
+    # cleanup temp column
+    if 'ID Numeric' in df_out.columns: del df_out['ID Numeric']
+
+    return df_out
+
+def to_excel_email_download(df_result, metrics_dict):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        red_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+        header_format = workbook.add_format({'bold': True, 'bg_color': '#005eb8', 'font_color': 'white', 'border': 1})
+        bold_format = workbook.add_format({'bold': True})
+        
+        # Dashboard summary 
+        ws0 = workbook.add_worksheet('Dashboard Summary')
+
+        # High level metrics
+        ws0.write('B2', "Email Validation Summary", header_format)
+        ws0.write('C2', "Count", header_format)
+        ws0.write('B3', "Total Records", bold_format)
+        ws0.write('C3', metrics_dict['Total'])
+        ws0.write('B4', "Correct Records", bold_format)
+        ws0.write('C4', metrics_dict['Correct'])
+        ws0.write('B5', "Records with Issues", bold_format)
+        ws0.write('C5', metrics_dict['Errors'])
+
+        ws0.set_column(1, 2, 25)
+
+        # Error Summary
+        df_err = df_result[df_result['Email_Validation_Errors'] != ""]
+        if not df_err.empty:
+            df_err.to_excel(writer, index=False, sheet_name='Error_Summary')
+            ws1 = writer.sheets['Error_Summary']
+            for i, col in enumerate(df_err.columns): ws1.write(0, i, col, header_format)
+            ws1.set_column(0, 0, 50)
+            ws1.set_column(1, len(df_err.columns)-1, 15)
+        
+        # Full email data
+        df_result.to_excel(writer, index=False, sheet_name='Full_Email_Data')
+        ws2 = writer.sheets['Full_Email_Data']
+        (max_row, max_col) = df_result.shape
+
+        for i, col in enumerate(df_result.columns): ws2.write(0, i, col, header_format)
+
+        # conditional formatting applied
+        ws2.conditional_format(1, 0, max_row, max_col - 1, {'type': 'formula', 'criteria': '=$A2<>""', 'format': red_format})
+        ws2.set_column(0, 0, 50)
 
     return output.getvalue()
 

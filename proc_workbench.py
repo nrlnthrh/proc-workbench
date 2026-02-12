@@ -1358,7 +1358,7 @@ def main():
             req_file = st.file_uploader("Upload 'SMD_Rules_Config.xlsx'", type=['xlsx'], key='smd_req')
 
             st.subheader("2. Upload Raw Data")
-            uploaded_file = st.file_uploader("Upload Raw Data", type=['xlsx'], key='smd_raw')
+            uploaded_file = st.file_uploader("Upload Raw SMD Data", type=['xlsx'], key='smd_raw')
 
         if uploaded_file and st.button("Run Analysis", type="primary"):
             with st.spinner(f"Analyzing..."):
@@ -1411,14 +1411,14 @@ def main():
         st.title("Purchase Order Analysis")
 
         with st.container(border=True):
-            st.subheader("1. Upload PO Rules")
+            st.subheader("1. Upload Rules Config")
             po_rules_file = st.file_uploader("Upload 'PO_Rules_Config.xlsx'", type=['xlsx'], key='po_rules')
 
-            st.subheader("2. Upload PO Data")
+            st.subheader("2. Upload Raw Data")
             po_raw_file = st.file_uploader("Upload Raw PO Data", type=['xlsx'], key='po_raw')
 
         if po_rules_file and po_raw_file: 
-            if st.button("Run PO Check", type="primary"):
+            if st.button("Run Analysis", type="primary"):
                 with st.spinner("Analyzing..."):
                     xls = pd.ExcelFile(po_raw_file)
                     all_dfs = []
@@ -1441,7 +1441,7 @@ def main():
                     st.metric("PO Lines with Errors", err_count)
 
                     data = to_excel_po_download(res_po, bad_cells, cat_list)
-                    st.download_button("Download PO Report", data, "PO_Analysis_Report.xlsx")
+                    st.download_button("Download Report", data, "PO_Analysis_Report.xlsx")
     # ==============================================================================================================
 
     # ==============================================================================================================
@@ -1452,10 +1452,11 @@ def main():
         st.title("Vendor Email Validation")
 
         with st.container(border=True):
+            st.subheader("Upload Raw Data")
             uploaded_email = st.file_uploader("Upload Email List", type=['xlsx'])
 
         if uploaded_email:
-            if st.button("Run Email Check", type="primary"):
+            if st.button("Run Analysis", type="primary"):
                 with st.spinner("Analyzing..."): 
                     xls = pd.ExcelFile(uploaded_email)
                     all_dfs = []
@@ -1488,7 +1489,7 @@ def main():
 
                         # Generate download
                         data = to_excel_email_download(res_email, metrics_dict)
-                        st.download_button("Download Email Report", data, "Email_Validation.xlsx")
+                        st.download_button("Download Report", data, "Email_Validation.xlsx")
                     else: st.success("Valid!")
                     
     # ==============================================================================================================

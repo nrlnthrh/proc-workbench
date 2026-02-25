@@ -1282,6 +1282,20 @@ def to_excel_email_download(df_result, metrics_dict):
 # =================================
 
 def main():
+    # Setup Assets
+    local_logo = "Infineon-Logo.svg"
+    web_logo = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bb/Infineon-Logo.svg/1280px-Infineon-Logo.svg.png?20210520093135"
+
+    if os.path.exists(local_logo):
+        logo_path = local_logo
+    else:
+        logo_path = web_logo
+
+    try: 
+        st.logo(logo_path, links="https://ww.infineon.com", icon_image=logo_path)
+    except:
+        pass
+
     # Session state setup
     if 'smd_on' not in st.session_state: st.session_state.smd_on = False
     if 'po_on' not in st.session_state: st.session_state.po_on = False
@@ -1304,12 +1318,8 @@ def main():
             st.session_state.po_on = False
 
     with st.sidebar:
-        st.title("🛡️ PROCleans")
-        st.caption("Hybrid Rule Engine")
-        st.markdown("---")
-
         # --- 1. Navigation ---
-        st.subheader("Select Modules")
+        st.subheader("Select Module")
 
         # Switch button to on/off modules
         show_smd = st.toggle("SMD Analysis", key="smd_on", on_change=toggle_smd)
@@ -1322,6 +1332,23 @@ def main():
             st.header("Configuration")
             target_cocd = st.text_input("Company Code:", placeholder="e.g., 3072")
             target_porg = st.text_input("Purchase Organization:", placeholder="e.g., 3072, 3050", help="Enter multiple Purchase Organizations separated by commas.")
+    
+    # ================================================
+    # BANNER
+    # ================================================
+    # SVG logo in the header
+    col_logo, col_text = st.columns([1, 6], vertical_alignment="center")
+    with col_logo:
+        try:
+            st.image(logo_path, use_container_width=True)
+        except:
+            st.warning("Logo not found")
+    with col_text:
+        st.markdown("""
+                    <h1 style='margin-bottom: 0; padding-top: 0;'>PROCleans</h1>
+                    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
         
     # ================================================
     # PAGE LOGIC
@@ -1333,17 +1360,14 @@ def main():
     if show_email: tabs_to_show.append("Email Validation")
 
     if not tabs_to_show:
-        st.title("PROCleans")
-        st.markdown("""
-                    <div style='background-color: #e6f3ff; padding: 20px; border-radius: 10px; border-left: 5px solid #005eb8;'>
-                        <h3>Welcome!
-                            Use the sidebar to enable or disable specific analysis modules.</h3>
-                        <h4>Available Modules:</h4>
-                        <p>- SMD Analysis: Validate Supplier Master Data against global and regional rules.</p>
-                        <p>- PO Analysis: Analyze Purchase Orders using a dynamic logic matrix.</p>
-                        <p>- Email Validation: Check vendor email lists for missing contacts or format errors.</p>
-                    </div>
-        """, unsafe_allow_html=True)
+        with st.container(border=True):
+            st.header("Welcome!")
+            st.write("Use the sidebar to enable specific analysis modules.")
+            
+            st.markdown("### Available Modules:")
+            st.info("**SMD Analysis:** Validate Supplier Master Data against global and regional rules.")
+            st.info("**PO Analysis:** Analyze Purchase Orders using a dynamic logic matrix.")
+            st.info("**Email Validation:** Check vendor email lists for missing contacts or format errors.")
         return
 
     # ==============================================================================================================
